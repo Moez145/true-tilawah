@@ -1,0 +1,14 @@
+# Required when TRANSCRIPTION_PROVIDER=tarteel or local_whisper
+# Install on top of requirements.txt:
+#   pip install -r requirements.txt -r requirements-local-whisper.txt
+faster-whisper==1.0.3
+# ctranslate2 4.5+ passes a `dtype=` kwarg to transformers that requires transformers >= 4.51.
+# transformers >= 4.50 in turn refuses to load `pytorch_model.bin` checkpoints unless torch >= 2.6
+# (CVE-2025-32434). Our requirements.txt pins torch < 2.6, and the Tarteel model only ships
+# pytorch_model.bin (no safetensors). The pair below is the last combo compatible with torch < 2.6.
+ctranslate2>=4.4.0,<4.5
+transformers>=4.39.0,<4.50
+huggingface-hub>=0.23.0
+pyarabic==0.6.15
+regex==2024.5.15
+gTTS==2.5.1

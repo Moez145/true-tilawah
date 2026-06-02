@@ -1,0 +1,42 @@
+# ── Environments ────────────────────────────────
+.env
+.env.local
+.env.*.local
+*/.env
+!*/.env.example
+
+# ── Python ───────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# ── AI service generated artifacts ──────────────
+ai-service/models/
+ai-service/data/
+ai-service/.env
+
+# ── Node / JS (top-up; backend & frontend have their own) ──
+node_modules/
+
+# ── OS / Editor ─────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ── Project-specific large files we never want committed ──
+*.zip
+*.tar.gz
+*.7z
+ai-service.zip
+
+# ── Prisma local migration scratch (per CLAUDE.md gotchas) ──
+backend/prisma/migrations/
+
+# ── Test audio fixtures: allow tracked ones, ignore stray recordings ──
+*.wav
+!ai-service/tests/fixtures/*.wav

@@ -1,0 +1,60 @@
+{
+  "expo": {
+    "name": "True Tilawah",
+    "slug": "true-tilawah",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#1A3C34",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.truetilawah.app",
+      "usesAppleSignIn": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "True Tilawah needs microphone access for Quranic recitation analysis.",
+        "NSSpeechRecognitionUsageDescription": "True Tilawah uses speech recognition to analyze your recitation."
+      },
+      "runtimeVersion": {
+        "policy": "appVersion"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#1A3C34"
+      },
+      "package": "com.truetilawah.app",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.INTERNET",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ],
+      "runtimeVersion": "1.0.0"
+    },
+    "web": {},
+    "plugins": [
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow True Tilawah to access your microphone for recitation."
+        }
+      ]
+    ],
+    "scheme": "truetilawah",
+    "sdkVersion": "54.0.0",
+    "extra": {
+      "eas": {
+        "projectId": "a2c1e3ae-e332-4bfd-a2b6-38d432aece1a"
+      }
+    },
+    "owner": "wamiqraheem",
+    "updates": {
+      "url": "https://u.expo.dev/a2c1e3ae-e332-4bfd-a2b6-38d432aece1a"
+    }
+  }
+}

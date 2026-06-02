@@ -1,0 +1,221 @@
+// This is your Prisma schema file for True Tilawah
+// Database: MySQL via PlanetScale or standard MySQL
+
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// USER & AUTH
+// ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  fullName     String
+  email        String   @unique
+  passwordHash String
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  progress     Progress?
+  sessions     Session[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// PROGRESS TRACKING
+// ─────────────────────────────────────────────
+
+model Progress {
+  id              String    @id @default(uuid())
+  userId          String    @unique
+  averageAccuracy Float     @default(0.0)
+  totalSessions   Int       @default(0)
+  totalMistakes   Int       @default(0)
+  improvedRules   Json      @default("[]")         // Stored as JSON array in MySQL
+  dailyStreak     Int       @default(0)
+  totalTimeMin    Int       @default(0)
+  lastPracticed   DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("progress")
+}
+
+// ─────────────────────────────────────────────
+// RECITATION SESSION
+// ─────────────────────────────────────────────
+
+model Session {
+  id            String        @id @default(uuid())
+  userId        String
+  surahId       Int
+  ayahStart     Int
+  ayahEnd       Int
+  transcript    String?       @db.Text
+  accuracyScore Float         @default(0.0)
+  status        SessionStatus @default(ACTIVE)
+  startTime     DateTime      @default(now())
+  endTime       DateTime?
+  durationSec   Int?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // Relations
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quranicText   QuranicText   @relation(fields: [surahId], references: [surahNumber])
+  recordings    Recording[]
+  feedbacks     Feedback[]
+
+  @@index([userId])
+  @@index([surahId])
+  @@map("sessions")
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+}
+
+// ─────────────────────────────────────────────
+// AUDIO RECORDING
+// ─────────────────────────────────────────────
+
+model Recording {
+  id             String   @id @default(uuid())
+  sessionId      String
+  audioUrl       String
+  format         String   @default("wav")
+  durationSec    Int?
+  fileSizeKb     Int?
+  timestampStart DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  // Relations
+  session        Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("recordings")
+}
+
+// ─────────────────────────────────────────────
+// TAJWEED RULES REFERENCE
+// ─────────────────────────────────────────────
+
+model TajweedRule {
+  id          String       @id @default(uuid())
+  ruleName    String       @unique
+  ruleCode    String       @unique
+  description String       @db.Text
+  severity    RuleSeverity @default(MEDIUM)
+  createdAt   DateTime     @default(now())
+
+  // Relations
+  feedbacks   Feedback[]
+
+  @@map("tajweed_rules")
+}
+
+enum RuleSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// ─────────────────────────────────────────────
+// FEEDBACK / ERROR LOG
+// ─────────────────────────────────────────────
+
+model Feedback {
+  id                 String      @id @default(uuid())
+  sessionId          String
+  tajweedRuleId      String?
+  errorType          ErrorType
+  incorrectWord      String
+  correctWord        String
+  wordPosition       Int?
+  ayahNumber         Int?
+  ruleApplied        String?
+  audioCorrectionUrl String?
+  confidenceScore    Float?
+  disputed           Boolean     @default(false)
+  createdAt          DateTime    @default(now())
+
+  // Relations
+  session            Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tajweedRule        TajweedRule? @relation(fields: [tajweedRuleId], references: [id])
+
+  @@index([sessionId])
+  @@index([tajweedRuleId])
+  @@map("feedbacks")
+}
+
+enum ErrorType {
+  MISPRONUNCIATION
+  OMITTED_WORD
+  ADDED_WORD
+  TAJWEED_VIOLATION
+  UNCLEAR_SPEECH
+}
+
+// ─────────────────────────────────────────────
+// QURANIC TEXT (SURAH METADATA)
+// ─────────────────────────────────────────────
+
+model QuranicText {
+  id          String    @id @default(uuid())
+  surahNumber Int       @unique
+  surahName   String
+  surahNameAr String
+  surahType   SurahType
+  totalAyahs  Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  ayahs       Ayah[]
+  sessions    Session[]
+
+  @@map("quranic_texts")
+}
+
+enum SurahType {
+  Makki
+  Madni
+}
+
+// ─────────────────────────────────────────────
+// INDIVIDUAL AYAH / VERSE
+// ─────────────────────────────────────────────
+
+model Ayah {
+  id            String      @id @default(uuid())
+  surahId       String
+  ayahNumber    Int
+  uthmaniText   String      @db.Text
+  translationEn String?     @db.Text
+  translationUr String?     @db.Text
+  audioUrl      String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  // Relations
+  surah         QuranicText @relation(fields: [surahId], references: [id])
+
+  @@unique([surahId, ayahNumber])
+  @@index([surahId])
+  @@map("ayahs")
+}

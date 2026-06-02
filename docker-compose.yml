@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: true_tilawah
+    ports: ["3306:3306"]
+    volumes: [mysql_data:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ai-service:
+    build: ./ai-service
+    environment:
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-tarteel}
+      VAD_SILENCE_THRESHOLD_SEC: "0.7"
+      VAD_MIN_SPEECH_SEC: "0.5"
+      STREAM_CHUNK_SEC: "0.25"
+      STREAM_WINDOW_SEC: "4.0"
+      STREAM_LOCK_IN_RUNS: "2"
+      PENDING_CORRECTION_TIMEOUT_SEC: "2.0"
+      AI_SERVICE_AUTH_TOKEN: ${AI_SERVICE_AUTH_TOKEN:-}
+      PORT: "8000"
+    expose: ["8000"]              # internal only — Node.js reaches it on Docker net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: "mysql://root:${MYSQL_ROOT_PASSWORD}@mysql:3306/true_tilawah"
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      AI_SERVICE_HOST: ai-service
+      AI_SERVICE_PORT: "8000"
+      AI_SERVICE_WS_PATH: "/ws/evaluate"
+      PORT: "5000"
+      CORS_ORIGIN: "*"
+    depends_on:
+      mysql:      { condition: service_healthy }
+      ai-service: { condition: service_healthy }
+    ports: ["5000:5000"]
+
+volumes:
+  mysql_data:

@@ -1,0 +1,19 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+rapidfuzz==3.9.7
+requests==2.32.3
+numpy>=1.26,<2.2
+python-multipart==0.0.9
+datasets==2.20.0
+torch>=2.0.0,<2.6
+torchaudio>=2.0.0,<2.6
+websockets>=12.0
+httpx==0.27.0
+python-dotenv==1.0.1
+pytest==8.3.2
+pytest-asyncio==0.24.0
+# Stationary spectral-gating noise reduction; called from app/audio_preprocess.py
+noisereduce==3.0.3
+# Silero VAD is loaded via torch.hub (no pip install needed)
+# but this is required by it:
+omegaconf>=2.1.0

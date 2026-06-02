@@ -1,0 +1,14 @@
+KFGQPC HAFS Uthmanic Script font
+
+Source: King Fahd Glorious Quran Printing Complex
+        https://fonts.qurancomplex.gov.sa/
+Bundled via: npm package "kfgqpc-uthmanic-script-hafs-regular"
+              https://www.npmjs.com/package/kfgqpc-uthmanic-script-hafs-regular
+
+This font is freely redistributable for the purpose of displaying the
+Quranic text. The font and its glyph forms are © King Fahd Glorious
+Quran Printing Complex. No modification of the glyph outlines is made
+by True Tilawah; the font file is bundled verbatim.
+
+If you redistribute True Tilawah, you must retain this notice and the
+font file together.

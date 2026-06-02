@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:registry.npmjs.org)",
+      "Read(//c/Users/Zamar Masood/.claude/projects/d--TrueTilawah/**)",
+      "Bash(npm uninstall *)",
+      "Bash(ls \"C:/Android/platform-tools/adb.exe\" 2>&1 || echo \"MISSING\")",
+      "Read(//c/Android/platform-tools/**)",
+      "Bash(dir \"d:\\\\TrueTilawah\\\\frontend\\\\assets\")",
+      "Bash(npm install *)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :5000)",
+      "Bash(ipconfig)",
+      "Bash(findstr /i \"IPv4\")",
+      "Bash(curl -s -o nul -w \"Status: %{http_code}\\\\n\" http://192.168.100.10:5000/api/health)",
+      "Bash(curl -s -o nul -w \"Status: %{http_code}\\\\n\" http://192.168.100.10:5000/health)",
+      "PowerShell(Get-NetFirewallRule -Direction Inbound -Enabled True | Where-Object { $_.DisplayName -match 'node|5000|expo' } | Select-Object DisplayName, Action, Profile | Format-Table -AutoSize)",
+      "PowerShell(Get-NetConnectionProfile)",
+      "Bash(curl -s https://api.alquran.cloud/v1/meta)",
+      "Bash(python -c \"import sys, json; d=json.load\\(sys.stdin\\)['data']; print\\('keys:', list\\(d.keys\\(\\)\\)\\); print\\('juzs[0]:', json.dumps\\(d['juzs']['references'][0], ensure_ascii=False\\)\\); print\\('hizbs[0]:', json.dumps\\(d['hizbQuarters']['references'][0], ensure_ascii=False\\) if 'hizbQuarters' in d else 'no hizbQuarters'\\); print\\('pages[0]:', json.dumps\\(d['pages']['references'][0], ensure_ascii=False\\)\\)\")",
+      "Bash(curl -s https://api.alquran.cloud/v1/meta -o /tmp/meta.json)",
+      "Bash(node -e \"const d=require\\('/tmp/meta.json'\\).data; console.log\\('keys:', Object.keys\\(d\\)\\); console.log\\('juzs.count:', d.juzs.count\\); console.log\\('juzs[0]:', JSON.stringify\\(d.juzs.references[0]\\)\\); console.log\\('juzs[1]:', JSON.stringify\\(d.juzs.references[1]\\)\\); console.log\\('juzs[29]:', JSON.stringify\\(d.juzs.references[29]\\)\\); console.log\\('pages.count:', d.pages.count\\); console.log\\('pages[0]:', JSON.stringify\\(d.pages.references[0]\\)\\); console.log\\('pages[1]:', JSON.stringify\\(d.pages.references[1]\\)\\); console.log\\('hizbs?', !!d.hizbs, 'hizbQuarters?', !!d.hizbQuarters\\);\")",
+      "Bash(curl -s -o \"C:\\\\Users\\\\Zamar Masood\\\\AppData\\\\Local\\\\Temp\\\\meta.json\" https://api.alquran.cloud/v1/meta)",
+      "Bash(node -e \"const d=require\\('C:/Users/Zamar Masood/AppData/Local/Temp/meta.json'\\).data; console.log\\('keys:', Object.keys\\(d\\)\\); console.log\\('juzs.count:', d.juzs.count\\); console.log\\('juzs[0]:', JSON.stringify\\(d.juzs.references[0]\\)\\); console.log\\('juzs[1]:', JSON.stringify\\(d.juzs.references[1]\\)\\); console.log\\('juzs[29]:', JSON.stringify\\(d.juzs.references[29]\\)\\); console.log\\('pages.count:', d.pages.count\\); console.log\\('pages[0]:', JSON.stringify\\(d.pages.references[0]\\)\\); console.log\\('pages[1]:', JSON.stringify\\(d.pages.references[1]\\)\\); console.log\\('has hizbs?', !!d.hizbs\\); console.log\\('has hizbQuarters?', !!d.hizbQuarters\\);\")",
+      "Bash(node -e \"const d=require\\('C:/Users/Zamar Masood/AppData/Local/Temp/meta.json'\\).data; console.log\\('surahs.count:', d.surahs.count\\); console.log\\('surahs[0]:', JSON.stringify\\(d.surahs.references[0]\\)\\); console.log\\('surahs[1]:', JSON.stringify\\(d.surahs.references[1]\\)\\); console.log\\('hizbQuarters.count:', d.hizbQuarters.count\\); console.log\\('hizbQ[0]:', JSON.stringify\\(d.hizbQuarters.references[0]\\)\\); console.log\\('hizbQ[4]:', JSON.stringify\\(d.hizbQuarters.references[4]\\)\\); console.log\\('hizbQ[239]:', JSON.stringify\\(d.hizbQuarters.references[239]\\)\\);\")",
+      "Bash(node -e ' *)",
+      "Bash(findstr /n /R \"PARAS\\\\|PAGES\\\\|HIZBS\" \"d:\\\\TrueTilawah\\\\frontend\\\\src\\\\screens\\\\QuranListScreen.js\")"
+    ]
+  }
+}

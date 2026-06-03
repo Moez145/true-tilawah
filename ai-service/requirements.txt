@@ -17,3 +17,4 @@ noisereduce==3.0.3
 # Silero VAD is loaded via torch.hub (no pip install needed)
 # but this is required by it:
 omegaconf>=2.1.0
+pyarabic

@@ -6,21 +6,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-local-whisper.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-local-whisper.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN python -m scripts.convert_tarteel_model
-RUN python -m scripts.build_word_timing_index
-
-ENV PORT=8000 \
-    STREAM_CHUNK_SEC=0.5 \
-    STREAM_WINDOW_SEC=4.0 \
-    STREAM_LOCK_IN_RUNS=2 \
-    VAD_SILENCE_THRESHOLD_SEC=0.7 \
-    PENDING_CORRECTION_TIMEOUT_SEC=2.0 \
-    TRANSCRIPTION_PROVIDER=tarteel
+ENV PORT=8000
+ENV TRANSCRIPTION_PROVIDER=groq
+ENV VAD_SILENCE_THRESHOLD_SEC=1.0
+ENV VAD_MIN_SPEECH_SEC=0.5
 
 EXPOSE 8000
 

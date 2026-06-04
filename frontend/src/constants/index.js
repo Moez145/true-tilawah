@@ -16,8 +16,9 @@ export { JUZ_ARABIC_NAMES } from './juzNames';
 //   3. Platform default (emulator/simulator only)
 const DEV_PORT = 5000;
 
+// ✅ Change to
 function getDevHost() {
-  if (!__DEV__) return null;
+  if (true) return null;
   const scriptURL = NativeModules?.SourceCode?.scriptURL || '';
   // scriptURL looks like "http://192.168.100.7:8081/index.bundle?platform=..."
   const m = scriptURL.match(/\/\/((?:\d{1,3}\.){3}\d{1,3}|\[[^\]]+\]|[\w-]+(?:\.[\w-]+)*)/);

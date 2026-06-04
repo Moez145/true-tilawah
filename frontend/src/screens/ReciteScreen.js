@@ -90,10 +90,10 @@ function showStreamError(err) {
     body  = 'Please allow microphone access in your phone Settings, then try again.';
   } else if (msg.toLowerCase().includes('timeout')) {
     title = "Can't reach the recitation service";
-    body  = 'Make sure your phone is on the same WiFi as the server, then try again.';
+    body  = 'Make sure your internet connection is working, then try again.';
   } else if (msg.toLowerCase().includes('network') || msg.toLowerCase().includes('ws')) {
     title = 'Connection failed';
-    body  = 'Check your WiFi and try again.';
+    body  = 'Check your internet connection and try again.';
   }
   Alert.alert(title, body);
 }
@@ -127,20 +127,26 @@ export default function ReciteScreen({ navigation, route }) {
   const speakingTimerRef  = useRef(null);
   const isRecordingRef    = useRef(false);
   const currentSessionRef = useRef(null);
-  // Keep refs in sync so closures always see latest values
+
+  // ✅ FIX: scopeRef always holds the latest scope so callbacks never
+  // capture a stale closure (e.g. Al-Fatihah when user picked Al-Baqarah).
+  const scopeRef = useRef(scope);
+  useEffect(() => { scopeRef.current = scope; }, [scope]);
+
+  // Keep other refs in sync
   isRecordingRef.current    = isRecording;
   currentSessionRef.current = currentSession;
 
   // ─── speakWord: pause mic → play only the mispronounced ayah → resume ────────
+  // ✅ FIX: uses scopeRef.current instead of scope so it always reflects the
+  // currently selected surah, not the stale closure value.
   const speakWord = useCallback(async (correctWord, ayahNumber) => {
     if (!correctWord) return;
 
-    // Pause mic so it doesn't pick up the playback
     audioStreamService.pauseStreaming?.();
     setSpeakingWord(correctWord === 'recite correct' ? 'Playing correct ayah…' : correctWord);
     if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
 
-    // Safety: always resume after 10s no matter what
     speakingTimerRef.current = setTimeout(() => {
       setSpeakingWord(null);
       quranAudioService.stop?.();
@@ -148,12 +154,10 @@ export default function ReciteScreen({ navigation, route }) {
     }, 10000);
 
     try {
-      if (ayahNumber && scope?.surahId) {
-        // Play ONLY the specific mispronounced ayah from your downloaded files
-        // quranAudioService.playAyah plays surah file seeking to that ayah's position
-        await quranAudioService.playAyah(scope.surahId, ayahNumber);
+      if (ayahNumber && scopeRef.current?.surahId) {
+        // ✅ scopeRef.current.surahId — always the correct selected surah
+        await quranAudioService.playAyah(scopeRef.current.surahId, ayahNumber);
       } else {
-        // Fallback to TTS if no ayah number available
         await new Promise((resolve) => {
           rawSpeak(correctWord, {
             onDone:    resolve,
@@ -167,11 +171,10 @@ export default function ReciteScreen({ navigation, route }) {
       console.log('[speakWord] error:', e.message);
     }
 
-    // Clear safety timer and resume mic
     if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
     setSpeakingWord(null);
     setTimeout(() => audioStreamService.resumeStreaming?.(), 500);
-  }, [scope?.surahId]);
+  }, []); // ✅ safe with empty deps because scopeRef.current is always fresh
 
   const mistakesByAyah = useMemo(() => {
     const m = new Map();
@@ -248,6 +251,8 @@ export default function ReciteScreen({ navigation, route }) {
   }, [hasSelectedScope, scope.surahId, scope.ayahStart, scope.ayahEnd]);
 
   // ─── Stream callbacks ─────────────────────────────────────────────────────────
+  // ✅ FIX: All references to scope inside this effect now use scopeRef.current
+  // so they always reflect the user's current selection, not the stale initial value.
   useEffect(() => {
     audioStreamService.setCallbacks(
       (msg) => {
@@ -266,7 +271,6 @@ export default function ReciteScreen({ navigation, route }) {
           }));
           setMistakes((prev) => [...stamped.reverse(), ...prev].slice(0, 20));
 
-          // Play audio ONCE per ayah — backend sends play_audio=true on first mistake
           if (msg.play_audio) {
             speakWord(stamped[0]?.correct || '', msg.ayah);
           }
@@ -280,17 +284,25 @@ export default function ReciteScreen({ navigation, route }) {
           }, ...prev].slice(0, 20));
 
         } else if (msg.type === 'out_of_scope') {
-          const correctAyah = scope.ayahStart;
+          // ✅ FIX: use scopeRef.current so the alert always shows the
+          // currently selected surah/ayah range, not the stale Al-Fatihah default.
+          const currentScope = scopeRef.current;
+          const correctAyah  = currentScope.ayahStart;
+
           Alert.alert(
             'Wrong Ayah',
-            `You recited outside the selected range (Ayah ${scope.ayahStart}–${scope.ayahEnd}). Please recite the correct ayah.`,
+            `You recited outside the selected range (Ayah ${currentScope.ayahStart}–${currentScope.ayahEnd}). Please recite the correct ayah.`,
             [{ text: 'OK' }]
           );
           setMistakes((prev) => [{
-            type: 'MISPRONUNCIATION', incorrect: msg.you_recited || '', correct: '',
-            tajweedRule: null, severity: 'high',
-            tip: `Wrong ayah. Please recite Ayah ${scope.ayahStart}–${scope.ayahEnd} of ${scope.surahName}.`,
-            ayah: correctAyah, ts: Date.now(),
+            type: 'MISPRONUNCIATION',
+            incorrect: msg.you_recited || '',
+            correct: '',
+            tajweedRule: null,
+            severity: 'high',
+            tip: `Wrong ayah. Please recite Ayah ${currentScope.ayahStart}–${currentScope.ayahEnd} of ${currentScope.surahName}.`,
+            ayah: correctAyah,
+            ts: Date.now(),
           }, ...prev].slice(0, 20));
           speakWord('recite correct', correctAyah);
 
@@ -435,7 +447,7 @@ export default function ReciteScreen({ navigation, route }) {
       if (status === 401) {
         Alert.alert('Please sign in again', 'Your session has expired.');
       } else if (status === 0 || err?.message?.toLowerCase().includes('network')) {
-        Alert.alert("Can't reach the server", 'Check your WiFi and make sure the backend is running.');
+        Alert.alert("Can't reach the server", 'Check your internet connection and try again.');
       } else {
         Alert.alert("Couldn't start recitation", 'Please try again.');
       }
@@ -473,12 +485,11 @@ export default function ReciteScreen({ navigation, route }) {
     setIsRecording(true);
   };
 
-  // ─── Save session — FIX: capture values BEFORE clearing state ────────────────
+  // ─── Save session ─────────────────────────────────────────────────────────────
   const handleSave = async () => {
     if (!currentSession) { Alert.alert('Info', 'Start recording first'); return; }
     setSaving(true);
 
-    // ✅ Capture all values NOW before any state is cleared
     const sessionToSave   = currentSession;
     const scopeToSave     = { ...scope };
     const mistakesToSave  = [...mistakes];
@@ -498,9 +509,8 @@ export default function ReciteScreen({ navigation, route }) {
       });
 
       setIsSaved(true);
-      setCurrentSession(null); // clear AFTER capturing above
+      setCurrentSession(null);
 
-      // ✅ Navigate to Track with complete data — use captured values, not state
       setTimeout(() => {
         setIsSaved(false);
         navigation.navigate('Track', {
@@ -513,7 +523,6 @@ export default function ReciteScreen({ navigation, route }) {
             ayahEnd:       scopeToSave.ayahEnd,
             accuracyScore: score,
             mistakesCount: mistakesToSave.length,
-            // ✅ Include only wrong ayahs for display in Track
             wrongAyahs:    [...new Set(mistakesToSave.map(m => m.ayah).filter(Boolean))],
             mistakes:      mistakesToSave,
             completedAt:   new Date().toISOString(),

@@ -17,8 +17,8 @@ export { JUZ_ARABIC_NAMES } from './juzNames';
 const DEV_PORT = 5000;
 
 // ✅ Change to
-function getDevHost() {
-  if (true) return null;
+  function getDevHost() {
+  if (!__DEV__) return null;
   const scriptURL = NativeModules?.SourceCode?.scriptURL || '';
   // scriptURL looks like "http://192.168.100.7:8081/index.bundle?platform=..."
   const m = scriptURL.match(/\/\/((?:\d{1,3}\.){3}\d{1,3}|\[[^\]]+\]|[\w-]+(?:\.[\w-]+)*)/);

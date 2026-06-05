@@ -90,25 +90,34 @@ function AyahText({ item }) {
 export default function RetainScreen({ navigation }) {
   const { surahs, surahsLoaded, setSurahData } = useApp();
 
-  const [showVerses,    setShowVerses]    = useState(true);
-  const [isRecording,   setIsRecording]   = useState(false);
-  const [surah,         setSurah]         = useState(null);
-  const [verseRange,    setVerseRange]    = useState([1, 7]);
-  const [isDemo,        setIsDemo]        = useState(false);
-  const [scopeAyahs,    setScopeAyahs]    = useState([]);
-  const [ayahsLoading,  setAyahsLoading]  = useState(false);
-  const [currentIdx,    setCurrentIdx]    = useState(0);
-  const [mistakes,      setMistakes]      = useState([]);
-  const [speakingWord,  setSpeakingWord]  = useState(null);
-  const [saving,        setSaving]        = useState(false);
+  const [showVerses,     setShowVerses]     = useState(true);
+  const [isRecording,    setIsRecording]    = useState(false);
+  const [surah,          setSurah]          = useState(null);
+  const [verseRange,     setVerseRange]     = useState([1, 7]);
+  const [isDemo,         setIsDemo]         = useState(false);
+  const [scopeAyahs,     setScopeAyahs]     = useState([]);
+  const [ayahsLoading,   setAyahsLoading]   = useState(false);
+  const [currentIdx,     setCurrentIdx]     = useState(0);
+  const [mistakes,       setMistakes]       = useState([]);
+  const [speakingWord,   setSpeakingWord]   = useState(null);
+  const [saving,         setSaving]         = useState(false);
   const [sessionStarted, setSessionStarted] = useState(false);
 
-  const sessionRef        = useRef(null);
-  const carouselRef       = useRef(null);
-  const speakingTimerRef  = useRef(null);
-  const isDemoRef         = useRef(false);
-  const isRecordingRef    = useRef(false);
-  const mistakeCountsRef  = useRef({});   // ← was missing, caused crash
+  const sessionRef       = useRef(null);
+  const carouselRef      = useRef(null);
+  const speakingTimerRef = useRef(null);
+  const isDemoRef        = useRef(false);
+  const isRecordingRef   = useRef(false);
+  const mistakeCountsRef = useRef({});
+
+  // ✅ FIX: surahRef always holds the latest surah so speakWord and
+  // wireCallbacks never capture a stale closure value.
+  const surahRef = useRef(surah);
+  useEffect(() => { surahRef.current = surah; }, [surah]);
+
+  // Also keep verseRange fresh in a ref for callbacks
+  const verseRangeRef = useRef(verseRange);
+  useEffect(() => { verseRangeRef.current = verseRange; }, [verseRange]);
 
   const pulse = useSharedValue(1);
   const ring  = useSharedValue(0.85);
@@ -191,6 +200,9 @@ export default function RetainScreen({ navigation }) {
   };
 
   // ── TTS / Audio feedback ─────────────────────────────────────────────────────
+  // ✅ FIX: uses surahRef.current instead of closing over `surah` state,
+  // so this never plays audio for the wrong surah even if the callback
+  // was registered before a surah change.
   const speakWord = useCallback(async (text, ayahNumber) => {
     if (!text) return;
     setSpeakingWord(text);
@@ -200,11 +212,10 @@ export default function RetainScreen({ navigation }) {
     speakingTimerRef.current = setTimeout(() => setSpeakingWord(null), 10000);
 
     try {
-      if (ayahNumber && surah?.surahNumber) {
-        // Play your downloaded Alafasy audio
-        await quranAudioService.playAyah(surah.surahNumber, ayahNumber);
+      // ✅ Always reads the latest surah via surahRef.current
+      if (ayahNumber && surahRef.current?.surahNumber) {
+        await quranAudioService.playAyah(surahRef.current.surahNumber, ayahNumber);
       } else {
-        // Fallback to TTS
         await new Promise((resolve) => {
           rawSpeak(text, {
             onDone:    resolve,
@@ -220,9 +231,11 @@ export default function RetainScreen({ navigation }) {
 
     if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
     setSpeakingWord(null);
-  }, [surah?.surahNumber]);
+  }, []); // ✅ safe with empty deps because we use surahRef.current
 
   // ── Wire stream callbacks ────────────────────────────────────────────────────
+  // ✅ FIX: empty deps [] is now safe because speakWord uses surahRef.current
+  // and out_of_scope uses verseRangeRef.current — both always fresh.
   const wireCallbacks = useCallback(() => {
     mistakeCountsRef.current = {}; // reset counts for new session
 
@@ -233,14 +246,12 @@ export default function RetainScreen({ navigation }) {
 
         // ── mistake event ──
         if (msg.type === 'mistake' && Array.isArray(msg.mistakes)) {
-          // Count mistakes
           for (const m of msg.mistakes) {
             const t = m?.type;
             if (!t) continue;
             mistakeCountsRef.current[t] = (mistakeCountsRef.current[t] || 0) + 1;
           }
 
-          // Update UI
           const stamped = msg.mistakes.map((m) => ({
             type:        m.type        || 'MISPRONUNCIATION',
             incorrect:   m.incorrect   || '',
@@ -253,26 +264,48 @@ export default function RetainScreen({ navigation }) {
           }));
           setMistakes((prev) => [...stamped.reverse(), ...prev].slice(0, 20));
 
-          // Play audio once per ayah (backend sends play_audio=true on first mistake)
           if (msg.play_audio && msg.ayah) {
             speakWord(stamped[0]?.correct || '', msg.ayah);
           }
           return;
         }
 
-        // ── unclear / out of scope ──
-        if (msg.type === 'unclear' || msg.type === 'out_of_scope') {
+        // ── out_of_scope ──
+        // ✅ FIX: uses verseRangeRef.current and surahRef.current so the
+        // alert always shows the correct currently-selected range.
+        if (msg.type === 'out_of_scope') {
+          const currentRange = verseRangeRef.current;
+          const currentSurah = surahRef.current;
+          Alert.alert(
+            'Wrong Ayah',
+            `You recited outside the selected range (Ayah ${currentRange[0]}–${currentRange[1]}). Please recite the correct ayah.`,
+            [{ text: 'OK' }]
+          );
+          setMistakes((prev) => [{
+            type:        'MISPRONUNCIATION',
+            incorrect:   msg.you_recited || '',
+            correct:     '',
+            tajweedRule: null,
+            severity:    'high',
+            tip: `Wrong ayah. Please recite Ayah ${currentRange[0]}–${currentRange[1]} of ${currentSurah?.surahName || 'the selected surah'}.`,
+            ayah: currentRange[0],
+            ts:  Date.now(),
+          }, ...prev].slice(0, 20));
+          speakWord('recite correct', currentRange[0]);
+          return;
+        }
+
+        // ── unclear ──
+        if (msg.type === 'unclear') {
           setMistakes((prev) => [{
             type:        'MISPRONUNCIATION',
             incorrect:   '',
             correct:     '',
             tajweedRule: null,
             severity:    null,
-            tip: msg.message || (msg.type === 'unclear'
-              ? 'Could not hear clearly — please try again.'
-              : "Doesn't match selected ayahs — please recite the correct ayah."),
-            ayah: msg.ayah ?? null,
-            ts:  Date.now(),
+            tip:         msg.message || 'Could not hear clearly — please speak louder and try again.',
+            ayah:        msg.ayah ?? null,
+            ts:          Date.now(),
           }, ...prev].slice(0, 20));
           return;
         }
@@ -285,10 +318,10 @@ export default function RetainScreen({ navigation }) {
           );
         }
       },
-      (_connected) => {},   // connection callback
-      (_finalReport) => {}, // final report callback
+      (_connected) => {},
+      (_finalReport) => {},
     );
-  }, [speakWord]);
+  }, []); // ✅ safe with empty deps — all values read via refs
 
   // ── Cleanup recording ────────────────────────────────────────────────────────
   const cleanupRecording = async ({ abandon = false } = {}) => {
@@ -313,37 +346,30 @@ export default function RetainScreen({ navigation }) {
 
   // ── Start recording ──────────────────────────────────────────────────────────
   const onStart = async () => {
-    if (!surah?.surahNumber) {
+    if (!surahRef.current?.surahNumber) {
       Alert.alert('Pick a surah', 'No surah selected.');
       return;
     }
 
     setMistakes([]);
     setSessionStarted(false);
-    sessionRef.current = null;
-    isDemoRef.current  = false;
+    sessionRef.current   = null;
+    isDemoRef.current    = false;
     setIsDemo(false);
     mistakeCountsRef.current = {};
-
-    // Guard: must have surah
-    if (!surah || !surah.surahNumber) {
-      Alert.alert('Select a surah', 'Please select a surah before recording.');
-      return;
-    }
 
     let session;
     try {
       session = await sessionService.createSession({
-        surahId:   surah.surahNumber,
-        ayahStart: verseRange[0],
-        ayahEnd:   verseRange[1],
+        surahId:   surahRef.current.surahNumber,
+        ayahStart: verseRangeRef.current[0],
+        ayahEnd:   verseRangeRef.current[1],
       });
     } catch (e) {
       Alert.alert('Could not start', e?.response?.data?.message || e?.message || 'Failed to create session.');
       return;
     }
 
-    // Guard: session must have id
     if (!session || !session.id) {
       Alert.alert('Error', 'Failed to create session. Please try again.');
       return;
@@ -355,9 +381,9 @@ export default function RetainScreen({ navigation }) {
     try {
       await audioStreamService.startStreaming({
         sessionId:  session.id,
-        surahId:    surah.surahNumber,
-        ayahStart:  verseRange[0],
-        ayahEnd:    verseRange[1],
+        surahId:    surahRef.current.surahNumber,
+        ayahStart:  verseRangeRef.current[0],
+        ayahEnd:    verseRangeRef.current[1],
       });
     } catch {
       // Fall back to demo mode if streaming fails
@@ -376,7 +402,7 @@ export default function RetainScreen({ navigation }) {
   const onStop = async () => {
     stopAnims();
     setIsRecording(false);
-    await new Promise((r) => setTimeout(r, 600)); // flush final messages
+    await new Promise((r) => setTimeout(r, 600));
     await cleanupRecording({ abandon: false });
   };
 
@@ -400,10 +426,10 @@ export default function RetainScreen({ navigation }) {
         await cleanupRecording({ abandon: false });
       }
 
-      const session       = sessionRef.current;
-      const counts        = countByType(mistakes);
-      const totalMistakes = mistakes.length;
-      const accuracyScore = clamp(Math.round(100 - totalMistakes * 4), 0, 100);
+      const session         = sessionRef.current;
+      const counts          = countByType(mistakes);
+      const totalMistakes   = mistakes.length;
+      const accuracyScore   = clamp(Math.round(100 - totalMistakes * 4), 0, 100);
       const mostCommonError = pickMostCommon(counts);
 
       if (session?.id) {
@@ -425,10 +451,10 @@ export default function RetainScreen({ navigation }) {
 
       navigation.navigate('RetainResults', {
         sessionId:      session?.id,
-        surahId:        surah?.surahNumber,
-        surahName:      surah?.surahName,
-        surahNameAr:    surah?.surahNameAr,
-        verseRange,
+        surahId:        surahRef.current?.surahNumber,
+        surahName:      surahRef.current?.surahName,
+        surahNameAr:    surahRef.current?.surahNameAr,
+        verseRange:     verseRangeRef.current,
         accuracyScore,
         mistakes,
         mistakeCounts:  counts,

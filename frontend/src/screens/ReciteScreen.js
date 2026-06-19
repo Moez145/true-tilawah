@@ -293,12 +293,7 @@ export default function ReciteScreen({ navigation, route }) {
           // currently selected surah/ayah range, not the stale Al-Fatihah default.
           const currentScope = scopeRef.current;
           const correctAyah  = currentScope.ayahStart;
-
-          Alert.alert(
-            'Wrong Ayah',
-            `You recited outside the selected range (Ayah ${currentScope.ayahStart}–${currentScope.ayahEnd}). Please recite the correct ayah.`,
-            [{ text: 'OK' }]
-          );
+          
           setMistakes((prev) => [{
             type: 'MISPRONUNCIATION',
             incorrect: msg.you_recited || '',

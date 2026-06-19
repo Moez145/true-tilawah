@@ -1,6 +1,7 @@
 import json
 import asyncio
 import base64
+import time
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 from app.config import VerseScope, VAD_SAMPLE_RATE
@@ -54,7 +55,7 @@ def check_tajweed(word: str, correct_word: str) -> list:
 
 
 def has_audio_energy(buf: np.ndarray, threshold: float = SILENCE_RMS_THRESHOLD) -> bool:
-    """Cheap silence gate — replaces VAD without the TorchScript dtype crash."""
+    """Cheap silence gate — fallback if VAD is unavailable."""
     if len(buf) == 0:
         return False
     rms = float(np.sqrt(np.mean(buf.astype(np.float64) ** 2)))
@@ -108,39 +109,42 @@ async def handle_ws_evaluate(ws: WebSocket):
 
     async def process_buffer(buf: np.ndarray):
         duration = len(buf) / VAD_SAMPLE_RATE
+        t_start = time.monotonic()
 
-        # ── Gate 1: VAD — only proceed if real speech is detected ─────────────
-        # Falls back to the RMS energy check if VAD fails to load/run for any reason.
+        # ── Gate 1: VAD — yes/no check only, NEVER trim/concatenate the audio ──
+        # Trimming was scrambling natural pauses between words (e.g. Madd
+        # elongation), which broke alignment and caused false "wrong ayah" hits.
+        speech_detected = None
         try:
-            from app.vad import run_vad
-            segments = run_vad(buf, None)
+            from app.vad import has_speech
+            t_vad0 = time.monotonic()
+            speech_detected = has_speech(buf, None)
+            t_vad1 = time.monotonic()
+            print(f"[WS] VAD check: {t_vad1 - t_vad0:.2f}s — speech={speech_detected}")
         except Exception as e:
             print(f"[WS] VAD unavailable ({e}) — falling back to energy gate")
-            segments = None
+            speech_detected = None
 
-        if segments is not None:
-            if not segments:
-                print(f"[WS] {duration:.2f}s buffer — no speech detected by VAD, skipping")
-                return
-            # Trim to just the detected speech — drops leading/trailing silence
-            # so Groq isn't asked to transcribe dead air alongside real speech.
-            speech_audio = np.concatenate([s["audio"] for s in segments])
-            speech_dur   = len(speech_audio) / VAD_SAMPLE_RATE
-            print(f"[WS] VAD found {len(segments)} segment(s), {speech_dur:.2f}s of speech in {duration:.2f}s buffer")
-        else:
-            # VAD didn't run — fall back to the simple RMS gate
-            if not has_audio_energy(buf):
-                print(f"[WS] {duration:.2f}s buffer is silence (RMS below threshold) — skipping")
-                return
-            speech_audio = buf
+        if speech_detected is None:
+            # VAD failed to run at all — fall back to RMS energy gate
+            speech_detected = has_audio_energy(buf)
 
-        print(f"[WS] Transcribing {len(speech_audio) / VAD_SAMPLE_RATE:.2f}s")
+        if not speech_detected:
+            print(f"[WS] {duration:.2f}s buffer — no speech detected, skipping "
+                  f"(total gate time {time.monotonic() - t_start:.2f}s)")
+            return
+
+        # ── Transcribe the FULL, UNTRIMMED buffer — preserves natural pauses ──
+        print(f"[WS] Transcribing {duration:.2f}s")
+        t_asr0 = time.monotonic()
         try:
-            tr = await provider.transcribe(speech_audio.astype(np.float32))
+            tr = await provider.transcribe(buf.astype(np.float32))
         except Exception as e:
             print(f"[WS] Transcription error: {e}")
             await safe_send(ws, {"type": "error", "code": "asr_failed", "message": str(e)})
             return
+        t_asr1 = time.monotonic()
+        print(f"[WS] ASR (Groq) took {t_asr1 - t_asr0:.2f}s")
 
         text = (tr.text or "").strip()
         if not text:
@@ -202,14 +206,15 @@ async def handle_ws_evaluate(ws: WebSocket):
                 "play_audio": play_audio,
             })
         else:
-            # ── This is the key fix: confirm CORRECT recitation explicitly ────
             print(f"[WS] 0 mistake(s) on ayah {ayah} — correct, sending confirmation")
-            audio_sent.discard(ayah)  # reset so next attempt on this ayah can replay audio if needed
+            audio_sent.discard(ayah)
             await safe_send(ws, {
                 "type":    "ok",
                 "ayah":    ayah,
                 "message": "Correct recitation",
             })
+
+        print(f"[WS] Total process_buffer time: {time.monotonic() - t_start:.2f}s")
 
     try:
         while True:

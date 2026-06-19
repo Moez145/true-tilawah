@@ -124,9 +124,13 @@ export default function ReciteScreen({ navigation, route }) {
   const [saving,         setSaving]         = useState(false);
   const [speakingWord,   setSpeakingWord]   = useState(null);
 
+  // ✅ NEW: tracks the last "correct recitation" confirmation from the AI service
+  const [lastResult, setLastResult] = useState(null);
+
   const speakingTimerRef  = useRef(null);
   const isRecordingRef    = useRef(false);
   const currentSessionRef = useRef(null);
+  const lastResultTimerRef = useRef(null);
 
   // ✅ FIX: scopeRef always holds the latest scope so callbacks never
   // capture a stale closure (e.g. Al-Fatihah when user picked Al-Baqarah).
@@ -270,6 +274,7 @@ export default function ReciteScreen({ navigation, route }) {
             ts:          Date.now(),
           }));
           setMistakes((prev) => [...stamped.reverse(), ...prev].slice(0, 20));
+          setLastResult(null); // clear any "correct" banner — a mistake just came in
 
           if (msg.play_audio) {
             speakWord(stamped[0]?.correct || '', msg.ayah);
@@ -304,7 +309,16 @@ export default function ReciteScreen({ navigation, route }) {
             ayah: correctAyah,
             ts: Date.now(),
           }, ...prev].slice(0, 20));
+          setLastResult(null);
           speakWord('recite correct', correctAyah);
+
+        } else if (msg.type === 'ok') {
+          // ✅ NEW: explicit confirmation that the recited ayah matched correctly
+          if (lastResultTimerRef.current) clearTimeout(lastResultTimerRef.current);
+          setLastResult({ ayah: msg.ayah, correct: true, ts: Date.now() });
+          lastResultTimerRef.current = setTimeout(() => {
+            setLastResult(null);
+          }, 3000);
 
         } else if (msg.type === 'error') {
           Alert.alert(
@@ -323,6 +337,7 @@ export default function ReciteScreen({ navigation, route }) {
       cancelAnimation(pulseScale);
       cancelAnimation(ring1);
       cancelAnimation(ring2);
+      if (lastResultTimerRef.current) clearTimeout(lastResultTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -433,6 +448,7 @@ export default function ReciteScreen({ navigation, route }) {
     }
 
     setMistakes([]);
+    setLastResult(null);
     setIsSaved(false);
 
     let session;
@@ -545,6 +561,7 @@ export default function ReciteScreen({ navigation, route }) {
     setIsConnected(false);
     setDemoMode(false);
     setMistakes([]);
+    setLastResult(null);
     if (currentSession) {
       sessionService.abandonSession(currentSession.id).catch(() => {});
       setCurrentSession(null);
@@ -764,6 +781,16 @@ export default function ReciteScreen({ navigation, route }) {
               <View style={s.speakingDot} />
               <Text style={s.speakingLbl}>SPEAKING</Text>
               <Text style={s.speakingWord} numberOfLines={1}>{speakingWord}</Text>
+            </View>
+          ) : null}
+
+          {/* ✅ NEW: Correct recitation confirmation banner */}
+          {lastResult?.correct ? (
+            <View style={s.correctBanner}>
+              <Check size={14} color={COLORS.white} />
+              <Text style={s.correctBannerTxt}>
+                Correct{lastResult.ayah ? ` — Ayah ${lastResult.ayah}` : ''}
+              </Text>
             </View>
           ) : null}
 
@@ -1036,6 +1063,9 @@ const s = StyleSheet.create({
   speakingDot:  { width: 7, height: 7, borderRadius: 4, backgroundColor: COLORS.white },
   speakingLbl:  { fontSize: 9, fontWeight: '800', color: 'rgba(255,255,255,0.85)', letterSpacing: 1, textTransform: 'uppercase' },
   speakingWord: { fontFamily: FONTS.quran, fontSize: 18, color: COLORS.white, marginLeft: 4, maxWidth: 200 },
+  // ✅ NEW: green "correct recitation" confirmation banner
+  correctBanner:    { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#16A34A', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999 },
+  correctBannerTxt: { fontSize: 12, fontWeight: '800', color: COLORS.white, letterSpacing: 0.4 },
   mistakePanel:  { width: '100%', maxWidth: 360 },
   mistakeHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
   mistakeDot:    { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.red },

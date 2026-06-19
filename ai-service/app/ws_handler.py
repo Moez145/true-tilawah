@@ -1,5 +1,6 @@
 import json
 import asyncio
+import base64
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 from app.config import VerseScope, VAD_SAMPLE_RATE
@@ -29,6 +30,12 @@ TAJWEED_RULES = [
     },
 ]
 
+# ── Tunable thresholds ────────────────────────────────────────────────────────
+SILENCE_RMS_THRESHOLD   = 0.01   # below this RMS = treat buffer as silence/noise
+MIN_ALIGN_SCORE         = 0.55   # below this = not a real match, ignore
+MIN_TRANSCRIPT_WORDS    = 2      # transcripts shorter than this are usually hallucinations
+
+
 def check_tajweed(word: str, correct_word: str) -> list:
     violations = []
     for rule in TAJWEED_RULES:
@@ -46,8 +53,15 @@ def check_tajweed(word: str, correct_word: str) -> list:
     return violations
 
 
+def has_audio_energy(buf: np.ndarray, threshold: float = SILENCE_RMS_THRESHOLD) -> bool:
+    """Cheap silence gate — replaces VAD without the TorchScript dtype crash."""
+    if len(buf) == 0:
+        return False
+    rms = float(np.sqrt(np.mean(buf.astype(np.float64) ** 2)))
+    return rms > threshold
+
+
 async def safe_send(ws: WebSocket, data: dict) -> bool:
-    """Send JSON safely — returns False if connection is closed."""
     try:
         await ws.send_json(data)
         return True
@@ -87,17 +101,20 @@ async def handle_ws_evaluate(ws: WebSocket):
     summary   = SummaryAccumulator()
     provider  = STATE["provider"]
     buffer    = np.array([], dtype=np.float32)
-    # Track which ayahs already had audio feedback sent
-    audio_sent = set()
+    audio_sent = set()  # ayahs that already got audio feedback this session
 
     await safe_send(ws, {"type": "ready"})
     print("[WS] Ready — waiting for audio")
 
     async def process_buffer(buf: np.ndarray):
-        """Transcribe buffer and send mistake events."""
         duration = len(buf) / VAD_SAMPLE_RATE
-        print(f"[WS] Transcribing {duration:.2f}s")
 
+        # ── Gate 1: silence/noise — skip entirely, don't even call Whisper ────
+        if not has_audio_energy(buf):
+            print(f"[WS] {duration:.2f}s buffer is silence (RMS below threshold) — skipping")
+            return
+
+        print(f"[WS] Transcribing {duration:.2f}s")
         try:
             tr = await provider.transcribe(buf.astype(np.float32))
         except Exception as e:
@@ -108,7 +125,11 @@ async def handle_ws_evaluate(ws: WebSocket):
         text = (tr.text or "").strip()
         if not text:
             print("[WS] Empty transcription — skipping")
-            await safe_send(ws, {"type": "unclear"})
+            return
+
+        # ── Gate 2: too-short transcripts are usually hallucinated noise ──────
+        if len(text.split()) < MIN_TRANSCRIPT_WORDS:
+            print(f"[WS] Transcript too short ({text!r}) — likely noise, skipping")
             return
 
         print(f"[WS] Transcribed: '{text}'")
@@ -127,10 +148,13 @@ async def handle_ws_evaluate(ws: WebSocket):
         score = match.get("score", 0)
         print(f"[WS] Aligned: ayah={ayah} score={score:.3f}")
 
-        # Build word-level mistakes
+        # ── Gate 3: low-confidence match = probably not real speech ──────────
+        if score < MIN_ALIGN_SCORE:
+            print(f"[WS] Score {score:.3f} below {MIN_ALIGN_SCORE} — treating as noise, not a mistake")
+            return
+
         mistakes = build_mistakes(text, match)
 
-        # Add tajweed violations
         recited_words  = text.split()
         expected_words = (STATE["quran"].get(scope.surah_id, {}).get(ayah, "")).split()
         for i, word in enumerate(recited_words):
@@ -147,7 +171,6 @@ async def handle_ws_evaluate(ws: WebSocket):
             for m in mistakes:
                 print(f"  → [{m['type']}] '{m.get('incorrect','')}' → '{m.get('correct','')}' ({m.get('tajweedRule')})")
 
-            # play_audio=True only ONCE per ayah so phone doesn't replay every chunk
             play_audio = ayah not in audio_sent
             if play_audio:
                 audio_sent.add(ayah)
@@ -159,34 +182,33 @@ async def handle_ws_evaluate(ws: WebSocket):
                 "play_audio": play_audio,
             })
         else:
-            print(f"[WS] 0 mistake(s) on ayah {ayah} — correct")
-            await safe_send(ws, {"type": "ok", "ayah": ayah})
+            # ── This is the key fix: confirm CORRECT recitation explicitly ────
+            print(f"[WS] 0 mistake(s) on ayah {ayah} — correct, sending confirmation")
+            audio_sent.discard(ayah)  # reset so next attempt on this ayah can replay audio if needed
+            await safe_send(ws, {
+                "type":    "ok",
+                "ayah":    ayah,
+                "message": "Correct recitation",
+            })
 
     try:
         while True:
             try:
-                # ── 60s timeout per chunk — prevents hanging forever ──────────
                 msg = await asyncio.wait_for(ws.receive(), timeout=60.0)
             except asyncio.TimeoutError:
                 print("[WS] Receive timeout — closing")
                 break
 
-            # STOP signal
             if "text" in msg:
                 txt = msg["text"].strip().upper()
                 if txt == "STOP":
                     print("[WS] STOP received")
                     break
-                # Ignore other text messages
                 continue
 
-            # Audio binary chunk
             if "bytes" in msg and msg["bytes"]:
                 raw = msg["bytes"]
-
-                # Backend sends JSON {"type":"audio","seq":N,"pcm":"<base64>"}
                 try:
-                    import base64
                     parsed = json.loads(raw.decode("utf-8"))
                     if parsed.get("type") == "audio":
                         pcm_bytes = base64.b64decode(parsed["pcm"])
@@ -194,11 +216,10 @@ async def handle_ws_evaluate(ws: WebSocket):
                     else:
                         continue
                 except Exception:
-                    # Raw float32 binary fallback
                     try:
                         chunk = np.frombuffer(raw, dtype=np.float32)
                         if len(chunk) > 4:
-                            chunk = chunk[1:]  # strip 4-byte seqNo header
+                            chunk = chunk[1:]
                     except Exception:
                         continue
 
@@ -209,10 +230,9 @@ async def handle_ws_evaluate(ws: WebSocket):
                 duration = len(buffer) / VAD_SAMPLE_RATE
                 print(f"[WS] Buffer: {duration:.2f}s")
 
-                # Process every 3 seconds of audio
                 if len(buffer) >= VAD_SAMPLE_RATE * 3:
                     buf_to_process = buffer.copy()
-                    buffer = np.array([], dtype=np.float32)  # clear immediately
+                    buffer = np.array([], dtype=np.float32)
                     await process_buffer(buf_to_process)
 
     except WebSocketDisconnect:
@@ -220,7 +240,6 @@ async def handle_ws_evaluate(ws: WebSocket):
     except Exception as e:
         print(f"[WS] Unexpected error: {e}")
 
-    # ── Final report ──────────────────────────────────────────────────────────
     final = summary.finalize()
     print(f"[WS] Final: accuracy={final.get('averageAccuracy', 0)} grade={final.get('grade', '—')}")
     await safe_send(ws, {"type": "final_report", **final})

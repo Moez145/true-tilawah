@@ -1,296 +1,245 @@
-import { Audio } from 'expo-av';
-import { WS_AUDIO_URL } from '../constants';
-import { storage } from '../utils/storage';
+import json
+import asyncio
+import base64
 
-class AudioStreamService {
-  constructor() {
-    this.socket           = null;
-    this.seqNo            = 0;
-    this.isStreaming      = false;
-    this._paused          = false;
-    this.demoTimer        = null;
-    this.onResult         = null;
-    this.onConnection     = null;
-    this.onFinalReport    = null;
-    this._recording       = null;
-    this._chunkLoopActive = false;
-    this._wsKeepAlive     = null;
-  }
+import numpy as np
+from fastapi import WebSocket, WebSocketDisconnect
 
-  setCallbacks(onResult, onConnection, onFinalReport) {
-    this.onResult      = onResult;
-    this.onConnection  = onConnection;
-    this.onFinalReport = onFinalReport;
-  }
+from app.ayah_aligner import ScopedAligner
+from app.config import VAD_SAMPLE_RATE, VerseScope
+from app.lifespan import STATE
+from app.pipeline import SummaryAccumulator, build_mistakes
 
-  async startStreaming({ sessionId, surahId, ayahStart, ayahEnd }) {
-    try {
-      const { granted } = await Audio.requestPermissionsAsync();
-      if (!granted) throw new Error('Microphone permission denied');
-    } catch (e) {
-      if (e.message?.includes('permission')) throw e;
-    }
+# Tajweed rules for violation detection
+TAJWEED_RULES = [
+    {
+        'name':     'Qalqala',
+        'letters':  set('قطبجد'),
+        'tip':      'Letters ق ط ب ج د require a slight echo/bounce sound (Qalqalah).',
+        'severity': 'medium',
+    },
+    {
+        'name':     'Ghunna',
+        'letters':  set('نم'),
+        'tip':      'Letters ن and م with shaddah require nasalization (Ghunnah) for 2 counts.',
+        'severity': 'medium',
+    },
+    {
+        'name':     'Madd',
+        'letters':  set('اوي'),
+        'tip':      'Elongate this vowel for the correct number of counts (Madd).',
+        'severity': 'low',
+    },
+]
 
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS:         true,
-        playsInSilentModeIOS:       true,
-        shouldDuckAndroid:          true,
-        playThroughEarpieceAndroid: false,
-        staysActiveInBackground:    false,
-      });
-    } catch {}
+# Tunable thresholds
+SILENCE_RMS_THRESHOLD = 0.01
+MIN_ALIGN_SCORE = 0.55
+MIN_TRANSCRIPT_WORDS = 2
 
-    const token = await storage.getAccessToken();
-    if (!token || !sessionId) throw new Error('Missing token or sessionId');
 
-    const url = `${WS_AUDIO_URL}?token=${encodeURIComponent(token)}&sessionId=${encodeURIComponent(sessionId)}`;
-    console.log('[audioStream] connecting to:', url);
-    this.socket = new WebSocket(url);
-    this.socket.binaryType = 'arraybuffer';
+def check_tajweed(word: str, correct_word: str) -> list:
+    violations = []
+    for rule in TAJWEED_RULES:
+        for ch in rule['letters']:
+            if ch in correct_word and ch not in word:
+                violations.append({
+                    'type': 'TAJWEED_VIOLATION',
+                    'incorrect': word,
+                    'correct': correct_word,
+                    'tajweedRule': rule['name'],
+                    'severity': rule['severity'],
+                    'tip': rule['tip'],
+                })
+                break
+    return violations
 
-    await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('WS connection timeout')), 10000);
-      this.socket.onopen  = () => { clearTimeout(t); console.log('[audioStream] WS open'); resolve(); };
-      this.socket.onerror = (e) => { clearTimeout(t); reject(new Error(e?.message || 'WS error')); };
-    });
 
-    this.onConnection?.(true);
+def has_audio_energy(buf: np.ndarray, threshold: float = SILENCE_RMS_THRESHOLD) -> bool:
+    """Cheap silence gate to skip buffers that are effectively empty."""
+    if len(buf) == 0:
+        return False
+    rms = float(np.sqrt(np.mean(buf.astype(np.float64) ** 2)))
+    return rms > threshold
 
-    this.socket.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        console.log('[audioStream] received:', msg.type, msg.ayah ? `ayah=${msg.ayah}` : '');
-        if (msg.type === 'final_report') this.onFinalReport?.(msg);
-        else                              this.onResult?.(msg);
-      } catch {}
-    };
 
-    this.socket.onclose = (e) => {
-      console.log('[audioStream] WS closed:', e.code);
-      this.onConnection?.(false);
-    };
+async def safe_send(ws: WebSocket, data: dict) -> bool:
+    try:
+        await ws.send_json(data)
+        return True
+    except Exception:
+        return False
 
-    this._wsKeepAlive = setInterval(() => {
-      if (this.socket?.readyState === WebSocket.OPEN) {
-        console.log('[audioStream] keepalive ping');
-      }
-    }, 20000);
 
-    this.seqNo       = 0;
-    this._paused     = false;
-    this.isStreaming = true;
-    console.log('[audioStream] Recording loop starting');
+async def handle_ws_evaluate(ws: WebSocket):
+    await ws.accept()
 
-    this._chunkLoopActive = true;
-    this._runChunkLoop(); // fire and forget — internal while loop
-  }
+    if not STATE.get("ready"):
+        await safe_send(ws, {"type": "error", "code": "not_ready"})
+        await ws.close()
+        return
 
-  async _runChunkLoop() {
-    while (this._chunkLoopActive && this.isStreaming) {
-      if (this._paused) {
-        await new Promise(r => setTimeout(r, 250));
-        continue;
-      }
+    try:
+        first = await asyncio.wait_for(ws.receive(), timeout=15.0)
+        if "text" not in first:
+            await safe_send(ws, {"type": "error", "code": "config_required"})
+            await ws.close()
+            return
+        cfg = json.loads(first["text"])
+        scope = VerseScope(
+            surah_id=int(cfg["surahId"]),
+            ayah_start=int(cfg["ayahStart"]),
+            ayah_end=int(cfg["ayahEnd"]),
+        )
+    except (asyncio.TimeoutError, KeyError, ValueError, json.JSONDecodeError) as e:
+        await safe_send(ws, {"type": "error", "code": "invalid_config", "message": str(e)})
+        await ws.close()
+        return
 
-      let recording = null;
-      try {
-        recording = new Audio.Recording();
-        await recording.prepareToRecordAsync({
-          android: {
-            extension:        '.wav',
-            outputFormat:     6,
-            audioEncoder:     3,
-            sampleRate:       16000,
-            numberOfChannels: 1,
-            bitRate:          256000,
-          },
-          ios: {
-            extension:            '.wav',
-            outputFormat:         'lpcm',
-            audioQuality:         127,
-            sampleRate:           16000,
-            numberOfChannels:     1,
-            bitRate:              256000,
-            linearPCMBitDepth:    16,
-            linearPCMIsFloat:     false,
-            linearPCMIsBigEndian: false,
-          },
-          web: {},
-          keepAudioActiveHint: true,
-        });
+    print(f"[WS] Config: surah={scope.surah_id} ayahs={scope.ayah_start}-{scope.ayah_end}")
 
-        if (!this._chunkLoopActive || !this.isStreaming) {
-          // stopStreaming() was called while we were preparing — bail before starting
-          try { await recording.stopAndUnloadAsync(); } catch {}
-          break;
-        }
+    aligner = ScopedAligner(scope, STATE["quran"])
+    summary = SummaryAccumulator()
+    provider = STATE["provider"]
+    buffer = np.array([], dtype=np.float32)
+    audio_sent = set()
 
-        this._recording = recording;
-        await recording.startAsync();
+    await safe_send(ws, {"type": "ready"})
+    print("[WS] Ready — waiting for audio")
 
-        const segmentMs = 3000;
-        const stepMs = 100;
-        let waited = 0;
-        while (waited < segmentMs && this._chunkLoopActive && this.isStreaming) {
-          await new Promise(r => setTimeout(r, stepMs));
-          waited += stepMs;
-        }
+    async def process_buffer(buf: np.ndarray):
+        duration = len(buf) / VAD_SAMPLE_RATE
 
-        // Only this iteration "owns" `recording` now. Clear the shared
-        // reference BEFORE stopping, so stopStreaming() can no longer
-        // reach in and double-stop the same native object.
-        const wasOwner = (this._recording === recording);
-        if (wasOwner) this._recording = null;
+        if not has_audio_energy(buf):
+            print(f"[WS] {duration:.2f}s buffer is silence (RMS below threshold) — skipping")
+            return
 
-        let uri = null;
-        try {
-          await recording.stopAndUnloadAsync();
-          uri = recording.getURI();
-        } catch (stopErr) {
-          // Already stopped/unloaded by stopStreaming() racing us — not
-          // fatal, this segment is just lost. Continue the loop normally.
-          console.log('[audioStream] segment stop race (expected occasionally):', stopErr.message);
-        }
+        print(f"[WS] Transcribing {duration:.2f}s")
+        try:
+            tr = await provider.transcribe(buf.astype(np.float32))
+        except Exception as e:
+            print(f"[WS] Transcription error: {e}")
+            await safe_send(ws, {"type": "error", "code": "asr_failed", "message": str(e)})
+            return
 
-        if (!this._chunkLoopActive || !this.isStreaming) break;
-        if (uri) await this._sendFinishedRecording(uri);
+        text = (tr.text or "").strip()
+        if not text:
+            print("[WS] Empty transcription — skipping")
+            return
 
-      } catch (e) {
-        console.log('[audioStream] chunk loop error:', e.message);
-        try { await recording?.stopAndUnloadAsync(); } catch {}
-        if (this._recording === recording) this._recording = null;
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-  }
+        if len(text.split()) < MIN_TRANSCRIPT_WORDS:
+            print(f"[WS] Transcript too short ({text!r}) — likely noise, skipping")
+            return
 
-  async _sendFinishedRecording(uri) {
-    if (this._paused) return;
-    if (this.socket?.readyState !== WebSocket.OPEN) {
-      console.log('[audioStream] WS not open, skipping chunk');
-      return;
-    }
+        print(f"[WS] Transcribed: '{text}'")
 
-    try {
-      const response = await fetch(uri);
-      const arrayBuf = await response.arrayBuffer();
-      const allBytes = new Uint8Array(arrayBuf);
+        match = aligner.align(text)
+        if match is None:
+            print(f"[WS] Out of scope: '{text}'")
+            await safe_send(ws, {
+                "type": "out_of_scope",
+                "you_recited": text,
+                "message": f"Please recite Surah {scope.surah_id} Ayah {scope.ayah_start}-{scope.ayah_end}.",
+            })
+            return
 
-      // Fully-closed WAV file: header is finalized and correct now.
-      if (allBytes.length <= 44) return;
-      const pcmBytes = allBytes.slice(44);
+        ayah = match.get("ayah")
+        score = match.get("score", 0)
+        print(f"[WS] Aligned: ayah={ayah} score={score:.3f}")
 
-      if (pcmBytes.length < 1024) return;
+        if score < MIN_ALIGN_SCORE:
+            print(f"[WS] Score {score:.3f} below {MIN_ALIGN_SCORE} — treating as noise, not a mistake")
+            return
 
-      let binary = '';
-      for (let i = 0; i < pcmBytes.length; i += 8192) {
-        binary += String.fromCharCode(...pcmBytes.slice(i, i + 8192));
-      }
-      const base64 = btoa(binary);
+        mistakes = build_mistakes(text, match)
 
-      this.socket.send(JSON.stringify({
-        type: 'audio',
-        seq:  this.seqNo++,
-        pcm:  base64,
-      }));
+        recited_words = text.split()
+        expected_words = (STATE["quran"].get(scope.surah_id, {}).get(ayah, "")).split()
+        for i, word in enumerate(recited_words):
+            exp = expected_words[i] if i < len(expected_words) else ""
+            if exp:
+                for v in check_tajweed(word, exp):
+                    mistakes.append(v)
 
-      console.log(`[audioStream] chunk #${this.seqNo} (${pcmBytes.length} bytes = ${(pcmBytes.length/32000).toFixed(1)}s)`);
+        summary.record(ayah, score, mistakes)
 
-    } catch (e) {
-      console.log('[audioStream] send error:', e.message);
-    }
-  }
+        if mistakes:
+            print(f"[WS] {len(mistakes)} mistake(s) on ayah {ayah}")
+            for m in mistakes:
+                print(f"  → [{m['type']}] '{m.get('incorrect','')}' → '{m.get('correct','')}' ({m.get('tajweedRule')})")
 
-  pauseStreaming() {
-    this._paused = true;
-    console.log('[audioStream] PAUSED');
-  }
+            play_audio = ayah not in audio_sent
+            if play_audio:
+                audio_sent.add(ayah)
 
-  resumeStreaming() {
-    this._paused = false;
-    console.log('[audioStream] RESUMED');
-  }
+            await safe_send(ws, {
+                "type": "mistake",
+                "ayah": ayah,
+                "mistakes": mistakes,
+                "play_audio": play_audio,
+            })
+        else:
+            print(f"[WS] 0 mistake(s) on ayah {ayah} — correct, sending confirmation")
+            audio_sent.discard(ayah)
+            await safe_send(ws, {
+                "type": "ok",
+                "ayah": ayah,
+                "message": "Correct recitation",
+            })
 
-  async stopStreaming() {
-    this.isStreaming = false;
-    this._paused     = false;
-    this._chunkLoopActive = false;
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=60.0)
+            except asyncio.TimeoutError:
+                print("[WS] Receive timeout — closing")
+                break
 
-    if (this._wsKeepAlive) {
-      clearInterval(this._wsKeepAlive);
-      this._wsKeepAlive = null;
-    }
+            if "text" in msg:
+                txt = msg["text"].strip().upper()
+                if txt == "STOP":
+                    print("[WS] STOP received")
+                    break
+                continue
 
-    // Give the loop a brief moment to notice the flags and exit cleanly
-    // before we try to touch _recording ourselves.
-    await new Promise(r => setTimeout(r, 150));
+            if "bytes" in msg and msg["bytes"]:
+                raw = msg["bytes"]
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                    if parsed.get("type") == "audio":
+                        pcm_bytes = base64.b64decode(parsed["pcm"])
+                        chunk = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                    else:
+                        continue
+                except Exception:
+                    try:
+                        chunk = np.frombuffer(raw, dtype=np.float32)
+                        if len(chunk) > 4:
+                            chunk = chunk[1:]
+                    except Exception:
+                        continue
 
-    if (this._recording) {
-      try { await this._recording.stopAndUnloadAsync(); } catch {}
-      this._recording = null;
-    }
+                if len(chunk) == 0:
+                    continue
 
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      try { this.socket.send('STOP'); } catch {}
-      await new Promise(r => setTimeout(r, 1000));
-      try { this.socket.close(); } catch {}
-    }
-    this.socket = null;
+                buffer = np.concatenate([buffer, chunk])
+                print(f"[WS] Buffer: {len(buffer) / VAD_SAMPLE_RATE:.2f}s")
 
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS:   false,
-        playsInSilentModeIOS: true,
-      });
-    } catch {}
+                if len(buffer) >= VAD_SAMPLE_RATE * 3:
+                    buf_to_process = buffer.copy()
+                    buffer = np.array([], dtype=np.float32)
+                    await process_buffer(buf_to_process)
 
-    console.log('[audioStream] stopped');
-  }
+    except WebSocketDisconnect:
+        print("[WS] Client disconnected")
+    except Exception as e:
+        print(f"[WS] Unexpected error: {e}")
 
-  startDemoMode() {
-    console.log('[audioStream] Demo mode ON');
-    let count = 0;
-    this.demoTimer = setInterval(() => {
-      count++;
-      if (count % 2 === 0) {
-        this.onResult?.({
-          type:     'mistake',
-          ayah:     1,
-          message:  'Demo mistake detected',
-          mistakes: [{
-            type:        'MISPRONUNCIATION',
-            incorrect:   'الرَّحْمَنِ',
-            correct:     'الرَّحِيمِ',
-            tajweedRule: null,
-            tip:         'Demo: Incorrect pronunciation detected',
-          }],
-        });
-      }
-    }, 5000);
-  }
+    final = summary.finalize()
+    print(f"[WS] Final: accuracy={final.get('averageAccuracy', 0)} grade={final.get('grade', '—')}")
+    await safe_send(ws, {"type": "final_report", **final})
 
-  stopDemoMode() {
-    if (this.demoTimer) {
-      clearInterval(this.demoTimer);
-      this.demoTimer = null;
-    }
-  }
-
-  get connected() {
-    return this.socket?.readyState === WebSocket.OPEN;
-  }
-}
-
-export const audioStreamService = new AudioStreamService();
-
-export const StreamErrorCode = {
-  MIC_PERMISSION:     'MIC_PERMISSION',
-  MIC_HARDWARE:       'MIC_HARDWARE',
-  NO_TOKEN:           'NO_TOKEN',
-  WS_TIMEOUT:         'WS_TIMEOUT',
-  WS_AUTH_FAILED:     'WS_AUTH_FAILED',
-  WS_SESSION_INVALID: 'WS_SESSION_INVALID',
-  WS_AI_UNAVAILABLE:  'WS_AI_UNAVAILABLE',
-  WS_NETWORK:         'WS_NETWORK',
-};
+    try:
+        await ws.close()
+    except Exception:
+        pass

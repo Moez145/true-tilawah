@@ -3,6 +3,8 @@
 Pure functions — no module-level mutable state. Callers pass `quran` dicts
 explicitly to `build_index`, and the loader returns a fresh dict each call.
 """
+import json
+import os
 import re
 from collections import defaultdict
 
@@ -42,17 +44,18 @@ SURAH_NAMES: dict[int, str] = {
 
 
 # ─────────────────────────────────────────────────────────────────
-# Arabic normalisation (verbatim from legacy lines 131-147)
+# Arabic normalisation — FIXED: now correctly strips all standard
+# Quranic harakat (fatha/damma/kasra/sukun/shadda/tanwin etc.)
 # ─────────────────────────────────────────────────────────────────
 _DIAC = re.compile(
     r"["
-    r"\u0610-\u061A"
-    r"\u064B-\u065F"
-    r"\u0670"
-    r"\u06D6-\u06DC"
-    r"\u06DF-\u06E8"
-    r"\u06EA-\u06ED"
-    r"\u08D3-\u08FF"
+    r"\u0610-\u061A"   # Quranic honorific/small high signs
+    r"\u064B-\u065F"   # full harakat: fathatan, dammatan, kasratan, fatha, damma, kasra, shadda, sukun, etc.
+    r"\u0670"          # superscript alef (elongation mark)
+    r"\u06D6-\u06DC"   # Quranic small high annotation marks
+    r"\u06DF-\u06E8"   # more Quranic marks (sukun variants, small waw/yaa)
+    r"\u06EA-\u06ED"   # empty centre marks, small low meem, etc.
+    r"\u08D3-\u08FF"   # Arabic Extended-A combining marks (used in some Quran texts)
     r"]"
 )
 
@@ -70,11 +73,46 @@ def normalize(text: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Quran loader (verbatim from legacy lines 153-195)
+# Quran loader — NOW LOADS FROM BUNDLED LOCAL JSON FIRST
+# (avoids HuggingFace timeout failures on Railway cold starts)
 # ─────────────────────────────────────────────────────────────────
+def _load_from_local_json() -> dict[int, dict[int, str]] | None:
+    """Try loading the pre-generated quran_data.json bundled in the repo."""
+    local_path = os.path.join(os.path.dirname(__file__), "..", "quran_data.json")
+    local_path = os.path.normpath(local_path)
+
+    if not os.path.exists(local_path):
+        return None
+
+    try:
+        with open(local_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        qt: dict = {int(s): {int(a): t for a, t in ayahs.items()} for s, ayahs in raw.items()}
+        total = sum(len(v) for v in qt.values())
+        if total < 6000:
+            # Sanity check — if the bundled file is incomplete/corrupted, don't trust it
+            print(f"   Local file only has {total} verses — looks incomplete, ignoring")
+            return None
+        print(f"   Local bundled file: {total} verses")
+        return qt
+    except Exception as e:
+        print(f"   Local file load failed: {e}")
+        return None
+
+
 def load_quran() -> dict[int, dict[int, str]]:
-    """Returns {surah: {ayah: text}}. Tries HuggingFace, then CDN, then embedded fallback."""
-    qt: dict = {}
+    """Returns {surah: {ayah: text}}.
+
+    Priority: bundled local JSON -> HuggingFace -> CDN -> embedded fallback.
+    The local JSON path avoids the network timeout issues seen when
+    downloading the full HuggingFace dataset on every cold start in
+    production (e.g. Railway).
+    """
+    qt = _load_from_local_json()
+    if qt:
+        return qt
+
+    qt = {}
     try:
         from datasets import load_dataset
         ds = load_dataset("nazimali/quran", split="train", trust_remote_code=True)

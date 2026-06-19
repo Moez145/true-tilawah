@@ -7,10 +7,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import { useFocusEffect } from '@react-navigation/native';
-import { Bell, BookOpen, Clock, Flame, Volume2, ArrowRight, Activity, ChevronRight } from 'lucide-react-native';
+import {
+  Bell, BookOpen, Clock, Flame, Volume2, ArrowRight,
+  Activity, ChevronRight, AlertCircle, Minus, Plus, Star,
+} from 'lucide-react-native';
 import Header from '../components/common/Header';
 import { progressService } from '../services/progressService';
 import { sessionService } from '../services/sessionService';
+import { quranAudioService } from '../services/quranAudioService';
 import { useAuth } from '../context/AuthContext';
 import { useApp } from '../context/AppContext';
 import { getShadow } from '../utils/helpers';
@@ -19,8 +23,8 @@ import { SessionRow } from '../components/sessions/SessionRow';
 
 const TAJWEED_DISPLAY = [
   { key: 'Ghunna',  label: 'Ghunnah (Nasalization)', sub: 'Frequency', bg: COLORS.blueLight,   iconKey: 'volume' },
-  { key: 'Madd',    label: 'Madd (Elongation)',      sub: 'Frequency', bg: COLORS.orangeLight, iconKey: 'arrow'  },
-  { key: 'Qalqala', label: 'Qalqalah (Echo)',        sub: 'Frequency', bg: COLORS.yellowLight, iconKey: 'pulse'  },
+  { key: 'Madd',    label: 'Madd (Elongation)',       sub: 'Frequency', bg: COLORS.orangeLight, iconKey: 'arrow'  },
+  { key: 'Qalqala', label: 'Qalqalah (Echo)',         sub: 'Frequency', bg: COLORS.yellowLight, iconKey: 'pulse'  },
 ];
 
 function frequencyFor(count) {
@@ -69,14 +73,180 @@ function iconFor(key) {
   return <Activity size={20} color={COLORS.white} />;
 }
 
+function MistakeIcon({ type }) {
+  switch (type) {
+    case 'OMITTED_WORD':      return <Minus       size={14} color={COLORS.white} />;
+    case 'ADDED_WORD':        return <Plus        size={14} color={COLORS.white} />;
+    case 'TAJWEED_VIOLATION': return <Star        size={14} color={COLORS.white} />;
+    default:                  return <AlertCircle size={14} color={COLORS.white} />;
+  }
+}
+
+const TYPE_LABELS = {
+  MISPRONUNCIATION:  'Mispronunciation',
+  OMITTED_WORD:      'Omitted Word',
+  ADDED_WORD:        'Extra Word',
+  TAJWEED_VIOLATION: 'Tajweed',
+};
+
+// ── Wrong Ayahs Panel ─────────────────────────────────────────────────────────
+function WrongAyahsPanel({ newSession }) {
+  const [playingAyah, setPlayingAyah] = useState(null);
+
+  if (!newSession) return null;
+
+  const { surahId, surahName, ayahStart, ayahEnd,
+          accuracyScore, mistakesCount, wrongAyahs = [],
+          mistakes = [] } = newSession;
+
+  // Group mistakes by ayah number
+  const byAyah = {};
+  for (const m of mistakes) {
+    if (!m.ayah) continue;
+    if (!byAyah[m.ayah]) byAyah[m.ayah] = [];
+    byAyah[m.ayah].push(m);
+  }
+
+  const ayahsToShow = wrongAyahs.length > 0
+    ? wrongAyahs
+    : Object.keys(byAyah).map(Number);
+
+  const playAyah = async (ayah) => {
+    if (playingAyah === ayah) {
+      await quranAudioService.stop();
+      setPlayingAyah(null);
+      return;
+    }
+    setPlayingAyah(ayah);
+    try {
+      await quranAudioService.playAyah(surahId, ayah);
+    } finally {
+      setPlayingAyah(null);
+    }
+  };
+
+  const scoreColor = accuracyScore >= 80
+    ? '#22C55E'
+    : accuracyScore >= 50
+      ? '#F97316'
+      : '#EF4444';
+
+  return (
+    <View style={s.wrongPanel}>
+      {/* Header row */}
+      <View style={s.wrongPanelHeader}>
+        <View style={s.wrongPanelLeft}>
+          <Text style={s.wrongPanelTitle}>Last Session</Text>
+          <Text style={s.wrongPanelSub}>
+            {surahName}  ·  Ayah {ayahStart}–{ayahEnd}
+          </Text>
+        </View>
+        <View style={[s.scorePill, { backgroundColor: scoreColor }]}>
+          <Text style={s.scorePillTxt}>{accuracyScore}%</Text>
+        </View>
+      </View>
+
+      {/* Summary row */}
+      <View style={s.wrongSummaryRow}>
+        <View style={s.wrongSummaryItem}>
+          <Text style={s.wrongSummaryNum}>{mistakesCount ?? mistakes.length}</Text>
+          <Text style={s.wrongSummaryLbl}>Mistakes</Text>
+        </View>
+        <View style={s.wrongSummaryDivider} />
+        <View style={s.wrongSummaryItem}>
+          <Text style={s.wrongSummaryNum}>{ayahsToShow.length}</Text>
+          <Text style={s.wrongSummaryLbl}>Wrong Ayahs</Text>
+        </View>
+        <View style={s.wrongSummaryDivider} />
+        <View style={s.wrongSummaryItem}>
+          <Text style={s.wrongSummaryNum}>{ayahEnd - ayahStart + 1}</Text>
+          <Text style={s.wrongSummaryLbl}>Total Ayahs</Text>
+        </View>
+      </View>
+
+      {/* Per-ayah rows — only wrong ones */}
+      {ayahsToShow.length === 0 ? (
+        <View style={s.allCorrectBox}>
+          <Text style={s.allCorrectTxt}>✓ No mistakes — excellent recitation!</Text>
+        </View>
+      ) : (
+        <View style={s.wrongAyahList}>
+          <Text style={s.wrongAyahListTitle}>Mispronounced Ayahs</Text>
+          {ayahsToShow.map((ayah) => {
+            const ayahMistakes = byAyah[ayah] || [];
+            const isPlaying    = playingAyah === ayah;
+            return (
+              <View key={ayah} style={s.wrongAyahRow}>
+                {/* Ayah number + play button */}
+                <View style={s.wrongAyahLeft}>
+                  <View style={s.wrongAyahNumPill}>
+                    <Text style={s.wrongAyahNumTxt}>Ayah {ayah}</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[s.playBtn, isPlaying && s.playBtnActive]}
+                    onPress={() => playAyah(ayah)}
+                    activeOpacity={0.8}
+                  >
+                    <Volume2 size={16} color={isPlaying ? COLORS.primary : COLORS.white} />
+                    <Text style={[s.playBtnTxt, isPlaying && s.playBtnTxtActive]}>
+                      {isPlaying ? 'Playing…' : 'Play Ayah'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Mistake chips for this ayah */}
+                {ayahMistakes.length > 0 && (
+                  <View style={s.mistakeChips}>
+                    {ayahMistakes.slice(0, 3).map((m, i) => (
+                      <View key={i} style={[s.chip, chipColor(m.type)]}>
+                        <MistakeIcon type={m.type} />
+                        <Text style={s.chipTxt}>
+                          {TYPE_LABELS[m.type] || 'Mistake'}
+                        </Text>
+                      </View>
+                    ))}
+                    {ayahMistakes.length > 3 && (
+                      <View style={[s.chip, { backgroundColor: COLORS.gray400 }]}>
+                        <Text style={s.chipTxt}>+{ayahMistakes.length - 3}</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+
+                {/* Tip from first mistake */}
+                {ayahMistakes[0]?.tip ? (
+                  <Text style={s.wrongAyahTip}>{ayahMistakes[0].tip}</Text>
+                ) : null}
+              </View>
+            );
+          })}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function chipColor(type) {
+  switch (type) {
+    case 'OMITTED_WORD':      return { backgroundColor: COLORS.gray500 };
+    case 'ADDED_WORD':        return { backgroundColor: COLORS.orange };
+    case 'TAJWEED_VIOLATION': return { backgroundColor: '#CA8A04' };
+    default:                  return { backgroundColor: COLORS.red };
+  }
+}
+
+// ── Main Screen ───────────────────────────────────────────────────────────────
 export default function TrackScreen({ navigation, route }) {
   const { user } = useAuth();
   const { surahs, localAvatarUri } = useApp();
+
   const [progress,       setProgress]       = useState(null);
   const [tajweed,        setTajweed]        = useState([]);
   const [recentSessions, setRecentSessions] = useState([]);
   const [loading,        setLoading]        = useState(true);
   const [refreshing,     setRefreshing]     = useState(false);
+  // ✅ Store latest session result to show wrong ayahs
+  const [lastSession,    setLastSession]    = useState(null);
 
   const tajweedCounts = {};
   for (const v of tajweed || []) {
@@ -111,17 +281,18 @@ export default function TrackScreen({ navigation, route }) {
   // Initial load
   useEffect(() => { load(true); }, []);
 
-  // Refresh when navigated to with a newSession param (from ReciteScreen or RetainScreen)
+  // ✅ Receive newSession from ReciteScreen / RetainScreen
   useEffect(() => {
     const newSession = route?.params?.newSession;
     if (newSession) {
-      console.log('[Track] New session received — refreshing');
-      load(false);
+      console.log('[Track] New session received:', newSession.id);
+      setLastSession(newSession); // show wrong ayahs panel
+      load(false);                // refresh stats + recent sessions
       navigation.setParams({ newSession: undefined });
     }
   }, [route?.params?.newSession]);
 
-  // Also refresh every time the screen comes into focus
+  // Refresh every time screen comes into focus
   useFocusEffect(
     useCallback(() => {
       load(false);
@@ -184,6 +355,11 @@ export default function TrackScreen({ navigation, route }) {
             <BookOpen size={56} color="rgba(255,255,255,0.25)" />
           </View>
         </LinearGradient>
+
+        {/* ✅ Wrong Ayahs Panel — shows after saving a session */}
+        {lastSession && (
+          <WrongAyahsPanel newSession={lastSession} />
+        )}
 
         {/* Overall Performance */}
         <View style={[s.perfCard, getShadow(1), { marginBottom: 18 }]}>
@@ -315,4 +491,34 @@ const s = StyleSheet.create({
   errSub:          { fontSize: 9, fontWeight: '600', color: COLORS.gray500, marginTop: 2 },
   freqPill:        { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
   freqTxt:         { fontSize: 9, fontWeight: '700', color: COLORS.white, textTransform: 'uppercase', letterSpacing: 0.5 },
+
+  // ── Wrong Ayahs Panel ──────────────────────────────────────────────────────
+  wrongPanel:          { backgroundColor: COLORS.white, borderRadius: 22, padding: 18, marginBottom: 18, borderWidth: 1, borderColor: COLORS.gray100, gap: 14 },
+  wrongPanelHeader:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  wrongPanelLeft:      { flex: 1 },
+  wrongPanelTitle:     { fontSize: 14, fontWeight: '800', color: COLORS.primary },
+  wrongPanelSub:       { fontSize: 11, color: COLORS.gray500, marginTop: 2 },
+  scorePill:           { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 999 },
+  scorePillTxt:        { fontSize: 14, fontWeight: '800', color: COLORS.white },
+  wrongSummaryRow:     { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.gray100, borderRadius: 14, paddingVertical: 12, paddingHorizontal: 8 },
+  wrongSummaryItem:    { flex: 1, alignItems: 'center' },
+  wrongSummaryNum:     { fontSize: 20, fontWeight: '800', color: COLORS.primary },
+  wrongSummaryLbl:     { fontSize: 9, fontWeight: '700', color: COLORS.gray500, marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.5 },
+  wrongSummaryDivider: { width: 1, height: 32, backgroundColor: COLORS.gray200 },
+  allCorrectBox:       { backgroundColor: '#F0FDF4', borderRadius: 14, padding: 14, alignItems: 'center' },
+  allCorrectTxt:       { fontSize: 13, fontWeight: '700', color: '#16A34A' },
+  wrongAyahList:       { gap: 10 },
+  wrongAyahListTitle:  { fontSize: 11, fontWeight: '800', color: COLORS.gray500, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 4 },
+  wrongAyahRow:        { backgroundColor: '#FFF5F5', borderRadius: 16, padding: 14, gap: 10, borderLeftWidth: 3, borderLeftColor: COLORS.red },
+  wrongAyahLeft:       { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  wrongAyahNumPill:    { backgroundColor: COLORS.red, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
+  wrongAyahNumTxt:     { fontSize: 11, fontWeight: '800', color: COLORS.white },
+  playBtn:             { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: COLORS.primary, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999 },
+  playBtnActive:       { backgroundColor: COLORS.secondaryUltraLight, borderWidth: 1, borderColor: COLORS.primary },
+  playBtnTxt:          { fontSize: 11, fontWeight: '700', color: COLORS.white },
+  playBtnTxtActive:    { color: COLORS.primary },
+  mistakeChips:        { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  chip:                { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 },
+  chipTxt:             { fontSize: 9, fontWeight: '700', color: COLORS.white, letterSpacing: 0.4 },
+  wrongAyahTip:        { fontSize: 11, color: '#991B1B', lineHeight: 16, fontWeight: '500' },
 });

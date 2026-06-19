@@ -293,7 +293,7 @@ export default function ReciteScreen({ navigation, route }) {
           // currently selected surah/ayah range, not the stale Al-Fatihah default.
           const currentScope = scopeRef.current;
           const correctAyah  = currentScope.ayahStart;
-          
+
           setMistakes((prev) => [{
             type: 'MISPRONUNCIATION',
             incorrect: msg.you_recited || '',
@@ -426,6 +426,11 @@ export default function ReciteScreen({ navigation, route }) {
   };
 
   // ─── Start / Stop recording ───────────────────────────────────────────────────
+  // ✅ FIX: removed leftover handleSave code (setIsSaved(true), setCurrentSession(null)
+  // immediately, and a setTimeout that referenced an undefined `score` variable and
+  // a `currentSession` that had just been nulled out). That block ran unconditionally
+  // 1.5s after every tap of the mic — regardless of whether the user had recited
+  // anything — and was the source of both the crash and the bogus "feedback".
   const handleToggle = async () => {
     if (!hasSelectedScope) {
       Alert.alert('Select ayah range first', 'Tap "Select Ayah Range" above to choose what to recite.');
@@ -444,26 +449,7 @@ export default function ReciteScreen({ navigation, route }) {
 
     setMistakes([]);
     setLastResult(null);
-    setIsSaved(true);
     setCurrentSession(null);
-
-      // Navigate to Track screen with session result
-      setTimeout(() => {
-        setIsSaved(false);
-        navigation.navigate('Track', {
-          newSession: {
-            id:            currentSession.id,
-            surahId:       scope.surahId,
-            surahName:     scope.surahName,
-            arabicName:    scope.arabicName,
-            ayahStart:     scope.ayahStart,
-            ayahEnd:       scope.ayahEnd,
-            accuracyScore: score,
-            mistakesCount: mistakes.length,
-            completedAt:   new Date().toISOString(),
-          }
-        });
-      }, 1500);
 
     let session;
     try {
@@ -544,11 +530,13 @@ export default function ReciteScreen({ navigation, route }) {
         setIsSaved(false);
         navigation.navigate('Track', {
           newSession: {
+            id:            sessionToSave.id,
             surahId:       scopeToSave.surahId,
             surahName:     scopeToSave.surahName,
             arabicName:    scopeToSave.arabicName,
             ayahStart:     scopeToSave.ayahStart,
             ayahEnd:       scopeToSave.ayahEnd,
+            accuracyScore: score,
             mistakesCount: mistakesToSave.length,
             wrongAyahs:    [...new Set(mistakesToSave.map(m => m.ayah).filter(Boolean))],
             mistakes:      mistakesToSave,

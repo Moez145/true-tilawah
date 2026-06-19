@@ -178,6 +178,11 @@ class AudioStreamService {
     }
   }
 
+  // ✅ FIX: this used to be defined twice in this class — once here, and again
+  // further down under a "Legacy compatibility" comment that referenced an
+  // undefined `LiveAudioStream` global. In JS, the second definition silently
+  // overrides the first, so the broken version was the one actually running.
+  // The dead duplicate has been removed; this is now the only definition.
   pauseStreaming() {
     this._paused = true;
     console.log('[audioStream] PAUSED');
@@ -252,18 +257,6 @@ class AudioStreamService {
       clearInterval(this.demoTimer);
       this.demoTimer = null;
     }
-  }
-
-  // Legacy compatibility
-  pauseStreaming() {
-    try { LiveAudioStream.stop(); } catch {}
-    this._paused = true;
-  }
-
-  resumeStreaming() {
-    if (!this.isStreaming || !this._paused) return;
-    try { LiveAudioStream.start(); } catch {}
-    this._paused = false;
   }
 
   get connected() {

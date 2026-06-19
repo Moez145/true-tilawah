@@ -540,18 +540,15 @@ export default function ReciteScreen({ navigation, route }) {
 
       setIsSaved(true);
       setCurrentSession(null);
-
       setTimeout(() => {
         setIsSaved(false);
         navigation.navigate('Track', {
           newSession: {
-            id:            sessionToSave.id,
             surahId:       scopeToSave.surahId,
             surahName:     scopeToSave.surahName,
             arabicName:    scopeToSave.arabicName,
             ayahStart:     scopeToSave.ayahStart,
             ayahEnd:       scopeToSave.ayahEnd,
-            accuracyScore: score,
             mistakesCount: mistakesToSave.length,
             wrongAyahs:    [...new Set(mistakesToSave.map(m => m.ayah).filter(Boolean))],
             mistakes:      mistakesToSave,

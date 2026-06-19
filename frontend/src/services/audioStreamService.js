@@ -2,33 +2,13 @@ import { Audio } from 'expo-av';
 import { WS_AUDIO_URL } from '../constants';
 import { storage } from '../utils/storage';
 
-// Scans a WAV file's RIFF sub-chunks to find the real 'data' chunk,
-// since some Android encoders write extra chunks (LIST/fact/etc.)
-// before the audio data, making the header size vary (44, 46, 78...).
-function findWavDataOffset(bytes) {
-  // RIFF header is 12 bytes: "RIFF"[4] + size[4] + "WAVE"[4]
-  if (bytes.length < 12) return null;
-  let offset = 12;
-  while (offset + 8 <= bytes.length) {
-    // Each sub-chunk: id[4] + size[4] + data[size]
-    const id = String.fromCharCode(
-      bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
-    );
-    const size =
-      bytes[offset + 4] |
-      (bytes[offset + 5] << 8) |
-      (bytes[offset + 6] << 16) |
-      (bytes[offset + 7] << 24);
-    const dataStart = offset + 8;
-    if (id === 'data') {
-      return { dataStart, dataSize: size };
-    }
-    offset = dataStart + size;
-    // WAV sub-chunks are word-aligned — pad by 1 byte if size is odd
-    if (size % 2 !== 0) offset += 1;
-  }
-  return null;
-}
+const DEMO_MISTAKES = [
+  "Tajweed: Missing Ghunnah on 'Noon'",
+  "Pronunciation: 'Ra' should be heavier (Tafkheem)",
+  "Makhraj: 'Ha' should come from throat",
+  "Madd: Vowel elongation too short",
+  "Qalqalah: Missing echo on 'Daal'",
+];
 
 class AudioStreamService {
   constructor() {
@@ -41,7 +21,8 @@ class AudioStreamService {
     this.onConnection  = null;
     this.onFinalReport = null;
     this._recording    = null;
-    this._chunkLoopActive = false;
+    this._chunkTimer   = null;
+    this._lastBytePos  = 44;
     this._wsKeepAlive  = null;
   }
 
@@ -52,6 +33,7 @@ class AudioStreamService {
   }
 
   async startStreaming({ sessionId, surahId, ayahStart, ayahEnd }) {
+    // 1. Mic permission
     try {
       const { granted } = await Audio.requestPermissionsAsync();
       if (!granted) throw new Error('Microphone permission denied');
@@ -59,6 +41,7 @@ class AudioStreamService {
       if (e.message?.includes('permission')) throw e;
     }
 
+    // 2. Audio mode
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS:         true,
@@ -69,6 +52,7 @@ class AudioStreamService {
       });
     } catch {}
 
+    // 3. Connect WebSocket
     const token = await storage.getAccessToken();
     if (!token || !sessionId) throw new Error('Missing token or sessionId');
 
@@ -99,154 +83,98 @@ class AudioStreamService {
       this.onConnection?.(false);
     };
 
+    // 4. Keep WebSocket alive — ping every 20s to prevent timeout
+    // CPU inference takes 5-15s so we need to stay connected
     this._wsKeepAlive = setInterval(() => {
       if (this.socket?.readyState === WebSocket.OPEN) {
+        // Send a small silent chunk as keepalive
         console.log('[audioStream] keepalive ping');
       }
     }, 20000);
 
-    this.seqNo      = 0;
-    this._paused    = false;
+    // 5. Start recording
+    this._recording   = new Audio.Recording();
+    this._lastBytePos = 44;
+    this.seqNo        = 0;
+    this._paused      = false;
+
+    await this._recording.prepareToRecordAsync({
+      android: {
+        extension:        '.wav',
+        outputFormat:     6,
+        audioEncoder:     3,
+        sampleRate:       16000,
+        numberOfChannels: 1,
+        bitRate:          128000,
+      },
+      ios: {
+        extension:            '.wav',
+        outputFormat:         'lpcm',
+        audioQuality:         127,
+        sampleRate:           16000,
+        numberOfChannels:     1,
+        bitRate:              128000,
+        linearPCMBitDepth:    16,
+        linearPCMIsFloat:     false,
+        linearPCMIsBigEndian: false,
+      },
+      web: {},
+      keepAudioActiveHint: true,
+    });
+
+    await this._recording.startAsync();
     this.isStreaming = true;
-    console.log('[audioStream] Recording loop starting');
+    console.log('[audioStream] Recording started');
 
-    // Loop of short, fully-closed recordings instead of tailing one live file.
-    this._chunkLoopActive = true;
-    this._runChunkLoop(); // fire and forget — internal while loop
+    // 6. Send audio chunks every 3 seconds
+    // Longer interval = more audio per chunk = better transcription
+    this._chunkTimer = setInterval(() => this._sendLatestChunk(), 3000);
   }
 
-  async _runChunkLoop() {
-    while (this._chunkLoopActive && this.isStreaming) {
-      if (this._paused) {
-        await new Promise(r => setTimeout(r, 250));
-        continue;
-      }
-
-      let recording = null;
-      try {
-        recording = new Audio.Recording();
-        await recording.prepareToRecordAsync({
-          android: {
-            extension:        '.wav',
-            outputFormat:     6,
-            audioEncoder:     3,
-            sampleRate:       16000,
-            numberOfChannels: 1,
-            bitRate:          256000,
-          },
-          ios: {
-            extension:            '.wav',
-            outputFormat:         'lpcm',
-            audioQuality:         127,
-            sampleRate:           16000,
-            numberOfChannels:     1,
-            bitRate:              256000,
-            linearPCMBitDepth:    16,
-            linearPCMIsFloat:     false,
-            linearPCMIsBigEndian: false,
-          },
-          web: {},
-          keepAudioActiveHint: true,
-        });
-
-        if (!this._chunkLoopActive || !this.isStreaming) {
-          // stop() was called while we were preparing — bail before starting
-          try { await recording.stopAndUnloadAsync(); } catch {}
-          break;
-        }
-
-        this._recording = recording;
-        await recording.startAsync();
-
-        // Record for ~3s. Check _paused/_chunkLoopActive mid-wait so stop is responsive.
-        const segmentMs = 3000;
-        const stepMs = 100;
-        let waited = 0;
-        while (waited < segmentMs && this._chunkLoopActive && this.isStreaming) {
-          await new Promise(r => setTimeout(r, stepMs));
-          waited += stepMs;
-        }
-
-        // Only this loop iteration "owns" `recording` now.
-        // Clear the shared reference BEFORE stopping, so stopStreaming()
-        // can no longer reach in and double-stop the same object.
-        const wasOwner = (this._recording === recording);
-        if (wasOwner) this._recording = null;
-
-        let uri = null;
-        try {
-          // Finalize — this is what makes the WAV header/data correct and complete.
-          await recording.stopAndUnloadAsync();
-          uri = recording.getURI();
-        } catch (stopErr) {
-          // Already stopped/unloaded by stopStreaming() racing us — not fatal,
-          // just means this segment is lost. Continue the loop normally.
-          console.log('[audioStream] segment stop race (expected occasionally):', stopErr.message);
-        }
-
-        if (!this._chunkLoopActive || !this.isStreaming) break;
-        if (uri) await this._sendFinishedRecording(uri);
-
-      } catch (e) {
-        console.log('[audioStream] chunk loop error:', e.message);
-        try { await recording?.stopAndUnloadAsync(); } catch {}
-        if (this._recording === recording) this._recording = null;
-        // brief backoff so a persistent error doesn't spin-loop
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-  }
-
-  async _sendFinishedRecording(uri) {
-    if (this._paused) return;
+  async _sendLatestChunk() {
+    if (this._paused || !this.isStreaming) return;
     if (this.socket?.readyState !== WebSocket.OPEN) {
       console.log('[audioStream] WS not open, skipping chunk');
       return;
     }
+    if (!this._recording) return;
 
     try {
+      const status = await this._recording.getStatusAsync();
+      if (!status.isRecording) return;
+
+      const uri = this._recording.getURI();
+      if (!uri) return;
+
       const response = await fetch(uri);
       const arrayBuf = await response.arrayBuffer();
       const allBytes = new Uint8Array(arrayBuf);
 
-      // Fully-closed WAV file: header is finalized and correct now.
-      // Don't assume a fixed 44-byte header — some Android encoders write
-      // extra sub-chunks (LIST/fact/etc.) before 'data', shifting the real
-      // offset. Scan the RIFF chunks to find the actual data start/size.
-      const wavInfo = findWavDataOffset(allBytes);
-      if (!wavInfo) {
-        console.log('[audioStream] could not find WAV data chunk, skipping');
-        return;
-      }
+      if (allBytes.length <= this._lastBytePos) return;
 
-      let { dataStart, dataSize } = wavInfo;
-      // Some encoders write dataSize=0 or a placeholder mid-recording;
-      // clamp to whatever bytes are actually available in the file.
-      const available = allBytes.length - dataStart;
-      if (dataSize <= 0 || dataSize > available) dataSize = available;
-      // Ensure an even byte count (whole int16 samples only) — trim any
-      // stray trailing byte so PCM16 alignment never drifts.
-      if (dataSize % 2 !== 0) dataSize -= 1;
-      if (dataSize < 1024) return;
+      const newBytes    = allBytes.slice(this._lastBytePos);
+      this._lastBytePos = allBytes.length;
 
-      const pcmBytes = allBytes.slice(dataStart, dataStart + dataSize);
+      if (newBytes.length < 1024) return;
 
+      // Encode as base64 in chunks to avoid stack overflow
       let binary = '';
-      for (let i = 0; i < pcmBytes.length; i += 8192) {
-        binary += String.fromCharCode(...pcmBytes.slice(i, i + 8192));
+      for (let i = 0; i < newBytes.length; i += 8192) {
+        binary += String.fromCharCode(...newBytes.slice(i, i + 8192));
       }
       const base64 = btoa(binary);
 
+      // Send as JSON — backend audio.ws.js parses this format
       this.socket.send(JSON.stringify({
         type: 'audio',
         seq:  this.seqNo++,
         pcm:  base64,
       }));
 
-      console.log(`[audioStream] chunk #${this.seqNo} (${pcmBytes.length} bytes = ${(pcmBytes.length/32000).toFixed(1)}s, dataStart=${dataStart})`);
+      console.log(`[audioStream] chunk #${this.seqNo} (${newBytes.length} bytes = ${(newBytes.length/32000).toFixed(1)}s)`);
 
     } catch (e) {
-      console.log('[audioStream] send error:', e.message);
+      console.log('[audioStream] chunk error:', e.message);
     }
   }
 
@@ -263,20 +191,21 @@ class AudioStreamService {
   async stopStreaming() {
     this.isStreaming = false;
     this._paused     = false;
-    this._chunkLoopActive = false;
 
     if (this._wsKeepAlive) {
       clearInterval(this._wsKeepAlive);
       this._wsKeepAlive = null;
     }
 
-    // Give the loop a brief moment to notice the flags and exit cleanly
-    // before we try to touch _recording ourselves.
-    await new Promise(r => setTimeout(r, 150));
+    if (this._chunkTimer) {
+      clearInterval(this._chunkTimer);
+      this._chunkTimer = null;
+    }
 
     if (this._recording) {
       try { await this._recording.stopAndUnloadAsync(); } catch {}
-      this._recording = null;
+      this._recording   = null;
+      this._lastBytePos = 44;
     }
 
     if (this.socket?.readyState === WebSocket.OPEN) {
@@ -325,6 +254,7 @@ class AudioStreamService {
     }
   }
 
+  // Legacy compatibility
   get connected() {
     return this.socket?.readyState === WebSocket.OPEN;
   }
@@ -332,6 +262,7 @@ class AudioStreamService {
 
 export const audioStreamService = new AudioStreamService();
 
+// Legacy compatibility — prevents crash if any file still imports StreamErrorCode
 export const StreamErrorCode = {
   MIC_PERMISSION:     'MIC_PERMISSION',
   MIC_HARDWARE:       'MIC_HARDWARE',

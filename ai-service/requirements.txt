@@ -18,3 +18,4 @@ noisereduce==3.0.3
 # but this is required by it:
 omegaconf>=2.1.0
 pyarabic
+onnxruntime

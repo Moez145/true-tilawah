@@ -238,6 +238,9 @@ async def handle_ws_evaluate(ws: WebSocket):
                     if parsed.get("type") == "audio":
                         pcm_bytes = base64.b64decode(parsed["pcm"])
                         chunk = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                        chunk_rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2))) if len(chunk) else 0.0
+                        chunk_max = float(np.max(np.abs(chunk))) if len(chunk) else 0.0
+                        print(f"[WS-DEBUG] chunk: {len(chunk)} samples, rms={chunk_rms:.6f}, max={chunk_max:.4f}")
                     else:
                         continue
                 except Exception:

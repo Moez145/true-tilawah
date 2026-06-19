@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 
-import torch
 from fastapi import FastAPI
 
 from app.quran_index import load_quran, build_index, SURAH_NAMES
@@ -20,16 +19,17 @@ STATE: dict = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[Startup] Loading Silero VAD ...")
-    vad_model, _ = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad",
-        model="silero_vad",
-        force_reload=False,
-        trust_repo=True,
-    )
-    vad_model.double()
-    STATE["vad"] = vad_model
-    print("[Startup] VAD loaded (float32) ✓")
+    print("[Startup] Loading Silero VAD (ONNX backend) ...")
+    # vad.py now manages its own lazy-loaded ONNX model internally —
+    # we just trigger the load here so the first real request isn't slow.
+    from app.vad import _ensure_loaded
+    try:
+        _ensure_loaded()
+        STATE["vad"] = "loaded"
+        print("[Startup] VAD loaded (ONNX) ✓")
+    except Exception as e:
+        print(f"[Startup] VAD failed to load: {e} — will fall back to no-VAD mode")
+        STATE["vad"] = None
 
     print("[Startup] Loading Quran dataset ...")
     STATE["quran"] = load_quran()

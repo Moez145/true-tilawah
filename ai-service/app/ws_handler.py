@@ -109,14 +109,34 @@ async def handle_ws_evaluate(ws: WebSocket):
     async def process_buffer(buf: np.ndarray):
         duration = len(buf) / VAD_SAMPLE_RATE
 
-        # ── Gate 1: silence/noise — skip entirely, don't even call Whisper ────
-        if not has_audio_energy(buf):
-            print(f"[WS] {duration:.2f}s buffer is silence (RMS below threshold) — skipping")
-            return
-
-        print(f"[WS] Transcribing {duration:.2f}s")
+        # ── Gate 1: VAD — only proceed if real speech is detected ─────────────
+        # Falls back to the RMS energy check if VAD fails to load/run for any reason.
         try:
-            tr = await provider.transcribe(buf.astype(np.float32))
+            from app.vad import run_vad
+            segments = run_vad(buf, None)
+        except Exception as e:
+            print(f"[WS] VAD unavailable ({e}) — falling back to energy gate")
+            segments = None
+
+        if segments is not None:
+            if not segments:
+                print(f"[WS] {duration:.2f}s buffer — no speech detected by VAD, skipping")
+                return
+            # Trim to just the detected speech — drops leading/trailing silence
+            # so Groq isn't asked to transcribe dead air alongside real speech.
+            speech_audio = np.concatenate([s["audio"] for s in segments])
+            speech_dur   = len(speech_audio) / VAD_SAMPLE_RATE
+            print(f"[WS] VAD found {len(segments)} segment(s), {speech_dur:.2f}s of speech in {duration:.2f}s buffer")
+        else:
+            # VAD didn't run — fall back to the simple RMS gate
+            if not has_audio_energy(buf):
+                print(f"[WS] {duration:.2f}s buffer is silence (RMS below threshold) — skipping")
+                return
+            speech_audio = buf
+
+        print(f"[WS] Transcribing {len(speech_audio) / VAD_SAMPLE_RATE:.2f}s")
+        try:
+            tr = await provider.transcribe(speech_audio.astype(np.float32))
         except Exception as e:
             print(f"[WS] Transcription error: {e}")
             await safe_send(ws, {"type": "error", "code": "asr_failed", "message": str(e)})

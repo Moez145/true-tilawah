@@ -444,7 +444,26 @@ export default function ReciteScreen({ navigation, route }) {
 
     setMistakes([]);
     setLastResult(null);
-    setIsSaved(false);
+    setIsSaved(true);
+    setCurrentSession(null);
+
+      // Navigate to Track screen with session result
+      setTimeout(() => {
+        setIsSaved(false);
+        navigation.navigate('Track', {
+          newSession: {
+            id:            currentSession.id,
+            surahId:       scope.surahId,
+            surahName:     scope.surahName,
+            arabicName:    scope.arabicName,
+            ayahStart:     scope.ayahStart,
+            ayahEnd:       scope.ayahEnd,
+            accuracyScore: score,
+            mistakesCount: mistakes.length,
+            completedAt:   new Date().toISOString(),
+          }
+        });
+      }, 1500);
 
     let session;
     try {

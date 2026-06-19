@@ -255,6 +255,17 @@ class AudioStreamService {
   }
 
   // Legacy compatibility
+  pauseStreaming() {
+    try { LiveAudioStream.stop(); } catch {}
+    this._paused = true;
+  }
+
+  resumeStreaming() {
+    if (!this.isStreaming || !this._paused) return;
+    try { LiveAudioStream.start(); } catch {}
+    this._paused = false;
+  }
+
   get connected() {
     return this.socket?.readyState === WebSocket.OPEN;
   }

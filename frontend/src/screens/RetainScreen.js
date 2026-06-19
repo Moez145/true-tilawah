@@ -236,92 +236,30 @@ export default function RetainScreen({ navigation }) {
   // ── Wire stream callbacks ────────────────────────────────────────────────────
   // ✅ FIX: empty deps [] is now safe because speakWord uses surahRef.current
   // and out_of_scope uses verseRangeRef.current — both always fresh.
-  const wireCallbacks = useCallback(() => {
-    mistakeCountsRef.current = {}; // reset counts for new session
-
-    audioStreamService.setCallbacks(
-      async (msg) => {
-        if (!msg || typeof msg !== 'object') return;
-        console.log('[RetainScreen] stream msg:', msg);
-
-        // ── mistake event ──
-        if (msg.type === 'mistake' && Array.isArray(msg.mistakes)) {
-          for (const m of msg.mistakes) {
-            const t = m?.type;
-            if (!t) continue;
-            mistakeCountsRef.current[t] = (mistakeCountsRef.current[t] || 0) + 1;
+  const wireCallbacks = () => {
+  audioStreamService.setCallbacks(
+    async (msg) => {
+      if (!msg) return;
+      if (msg.type === 'mistake' && Array.isArray(msg.mistakes)) {
+        for (const m of msg.mistakes) {
+          const t = m?.type;
+          if (!t) continue;
+          mistakeCountsRef.current[t] = (mistakeCountsRef.current[t] || 0) + 1;
+        }
+        // Play your downloaded Alafasy audio — only once per ayah (play_audio flag)
+        if (msg.play_audio && surah?.surahNumber && msg.ayah) {
+          try {
+            await quranAudioService.playAyah(surah.surahNumber, msg.ayah);
+          } catch (e) {
+            console.log('[RetainScreen] Audio error:', e.message);
           }
-
-          const stamped = msg.mistakes.map((m) => ({
-            type:        m.type        || 'MISPRONUNCIATION',
-            incorrect:   m.incorrect   || '',
-            correct:     m.correct     || '',
-            tajweedRule: m.tajweedRule  || null,
-            severity:    m.severity     || null,
-            tip:         m.tip          || (msg.message ?? ''),
-            ayah:        msg.ayah ?? null,
-            ts:          Date.now(),
-          }));
-          setMistakes((prev) => [...stamped.reverse(), ...prev].slice(0, 20));
-
-          if (msg.play_audio && msg.ayah) {
-            speakWord(stamped[0]?.correct || '', msg.ayah);
-          }
-          return;
         }
-
-        // ── out_of_scope ──
-        // ✅ FIX: uses verseRangeRef.current and surahRef.current so the
-        // alert always shows the correct currently-selected range.
-        if (msg.type === 'out_of_scope') {
-          const currentRange = verseRangeRef.current;
-          const currentSurah = surahRef.current;
-          Alert.alert(
-            'Wrong Ayah',
-            `You recited outside the selected range (Ayah ${currentRange[0]}–${currentRange[1]}). Please recite the correct ayah.`,
-            [{ text: 'OK' }]
-          );
-          setMistakes((prev) => [{
-            type:        'MISPRONUNCIATION',
-            incorrect:   msg.you_recited || '',
-            correct:     '',
-            tajweedRule: null,
-            severity:    'high',
-            tip: `Wrong ayah. Please recite Ayah ${currentRange[0]}–${currentRange[1]} of ${currentSurah?.surahName || 'the selected surah'}.`,
-            ayah: currentRange[0],
-            ts:  Date.now(),
-          }, ...prev].slice(0, 20));
-          speakWord('recite correct', currentRange[0]);
-          return;
-        }
-
-        // ── unclear ──
-        if (msg.type === 'unclear') {
-          setMistakes((prev) => [{
-            type:        'MISPRONUNCIATION',
-            incorrect:   '',
-            correct:     '',
-            tajweedRule: null,
-            severity:    null,
-            tip:         msg.message || 'Could not hear clearly — please speak louder and try again.',
-            ayah:        msg.ayah ?? null,
-            ts:          Date.now(),
-          }, ...prev].slice(0, 20));
-          return;
-        }
-
-        // ── error ──
-        if (msg.type === 'error') {
-          Alert.alert(
-            'Analysis problem',
-            msg.message || 'The recitation engine had a problem. Tap the mic to retry.',
-          );
-        }
-      },
-      (_connected) => {},
-      (_finalReport) => {},
-    );
-  }, []); // ✅ safe with empty deps — all values read via refs
+      }
+    },
+    (_connected) => {},
+    (_finalReport) => {},
+  );
+};
 
   // ── Cleanup recording ────────────────────────────────────────────────────────
   const cleanupRecording = async ({ abandon = false } = {}) => {
@@ -449,18 +387,19 @@ export default function RetainScreen({ navigation }) {
       sessionRef.current = null;
       setSessionStarted(false);
 
-      navigation.navigate('RetainResults', {
-        sessionId:      session?.id,
-        surahId:        surahRef.current?.surahNumber,
-        surahName:      surahRef.current?.surahName,
-        surahNameAr:    surahRef.current?.surahNameAr,
-        verseRange:     verseRangeRef.current,
-        accuracyScore,
-        mistakes,
-        mistakeCounts:  counts,
-        mostCommonError,
-        totalWords,
-        totalLetters,
+      // Send result to Track screen
+      navigation.navigate('Track', {
+        newSession: {
+          id:            session?.id,
+          surahId:       surah?.surahNumber,
+          surahName:     surah?.surahName,
+          ayahStart:     verseRange[0],
+          ayahEnd:       verseRange[1],
+          accuracyScore,
+          mistakesCount: totalMistakes,
+          completedAt:   new Date().toISOString(),
+          sessionType:   'retain',
+        }
       });
     } catch (err) {
       Alert.alert('Error', err?.message || 'Failed to save session');

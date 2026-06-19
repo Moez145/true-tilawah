@@ -149,7 +149,7 @@ export default function AuthScreen({ navigation }) {
         </View>
 
         {/* Social */}
-        <View style={styles.socialRow}>
+        {/* <View style={styles.socialRow}>
           <TouchableOpacity style={styles.socialBtn} activeOpacity={0.7}>
             <Image source={{ uri: 'https://upload.wikimedia.org/wikipedia/commons/5/51/Facebook_f_logo_%282019%29.svg' }} style={styles.socialIcon} />
           </TouchableOpacity>
@@ -165,7 +165,7 @@ export default function AuthScreen({ navigation }) {
                 : <Image source={{ uri: 'https://upload.wikimedia.org/wikipedia/commons/f/fa/Apple_logo_black.svg' }} style={[styles.socialIcon, { tintColor: '#000' }]} />}
             </TouchableOpacity>
           )}
-        </View>
+        </View> */}
 
         <Text style={styles.switchText}>
           {mode === 'register' ? 'Already have an account? ' : "Don't have an account? "}

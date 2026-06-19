@@ -2,6 +2,34 @@ import { Audio } from 'expo-av';
 import { WS_AUDIO_URL } from '../constants';
 import { storage } from '../utils/storage';
 
+// Scans a WAV file's RIFF sub-chunks to find the real 'data' chunk,
+// since some Android encoders write extra chunks (LIST/fact/etc.)
+// before the audio data, making the header size vary (44, 46, 78...).
+function findWavDataOffset(bytes) {
+  // RIFF header is 12 bytes: "RIFF"[4] + size[4] + "WAVE"[4]
+  if (bytes.length < 12) return null;
+  let offset = 12;
+  while (offset + 8 <= bytes.length) {
+    // Each sub-chunk: id[4] + size[4] + data[size]
+    const id = String.fromCharCode(
+      bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
+    );
+    const size =
+      bytes[offset + 4] |
+      (bytes[offset + 5] << 8) |
+      (bytes[offset + 6] << 16) |
+      (bytes[offset + 7] << 24);
+    const dataStart = offset + 8;
+    if (id === 'data') {
+      return { dataStart, dataSize: size };
+    }
+    offset = dataStart + size;
+    // WAV sub-chunks are word-aligned — pad by 1 byte if size is odd
+    if (size % 2 !== 0) offset += 1;
+  }
+  return null;
+}
+
 class AudioStreamService {
   constructor() {
     this.socket        = null;
@@ -82,7 +110,7 @@ class AudioStreamService {
     this.isStreaming = true;
     console.log('[audioStream] Recording loop starting');
 
-    // ── NEW: loop of short, fully-closed recordings instead of tailing one live file ──
+    // Loop of short, fully-closed recordings instead of tailing one live file.
     this._chunkLoopActive = true;
     this._runChunkLoop(); // fire and forget — internal while loop
   }
@@ -121,6 +149,12 @@ class AudioStreamService {
           keepAudioActiveHint: true,
         });
 
+        if (!this._chunkLoopActive || !this.isStreaming) {
+          // stop() was called while we were preparing — bail before starting
+          try { await recording.stopAndUnloadAsync(); } catch {}
+          break;
+        }
+
         this._recording = recording;
         await recording.startAsync();
 
@@ -133,21 +167,30 @@ class AudioStreamService {
           waited += stepMs;
         }
 
-        // Finalize — this is what makes the WAV header/data correct and complete
-        await recording.stopAndUnloadAsync();
-        this._recording = null;
+        // Only this loop iteration "owns" `recording` now.
+        // Clear the shared reference BEFORE stopping, so stopStreaming()
+        // can no longer reach in and double-stop the same object.
+        const wasOwner = (this._recording === recording);
+        if (wasOwner) this._recording = null;
+
+        let uri = null;
+        try {
+          // Finalize — this is what makes the WAV header/data correct and complete.
+          await recording.stopAndUnloadAsync();
+          uri = recording.getURI();
+        } catch (stopErr) {
+          // Already stopped/unloaded by stopStreaming() racing us — not fatal,
+          // just means this segment is lost. Continue the loop normally.
+          console.log('[audioStream] segment stop race (expected occasionally):', stopErr.message);
+        }
 
         if (!this._chunkLoopActive || !this.isStreaming) break;
-
-        const uri = recording.getURI();
-        if (!uri) continue;
-
-        await this._sendFinishedRecording(uri);
+        if (uri) await this._sendFinishedRecording(uri);
 
       } catch (e) {
         console.log('[audioStream] chunk loop error:', e.message);
         try { await recording?.stopAndUnloadAsync(); } catch {}
-        this._recording = null;
+        if (this._recording === recording) this._recording = null;
         // brief backoff so a persistent error doesn't spin-loop
         await new Promise(r => setTimeout(r, 500));
       }
@@ -167,11 +210,26 @@ class AudioStreamService {
       const allBytes = new Uint8Array(arrayBuf);
 
       // Fully-closed WAV file: header is finalized and correct now.
-      // Standard PCM WAV header is 44 bytes for this config (no extra chunks).
-      if (allBytes.length <= 44) return;
-      const pcmBytes = allBytes.slice(44);
+      // Don't assume a fixed 44-byte header — some Android encoders write
+      // extra sub-chunks (LIST/fact/etc.) before 'data', shifting the real
+      // offset. Scan the RIFF chunks to find the actual data start/size.
+      const wavInfo = findWavDataOffset(allBytes);
+      if (!wavInfo) {
+        console.log('[audioStream] could not find WAV data chunk, skipping');
+        return;
+      }
 
-      if (pcmBytes.length < 1024) return;
+      let { dataStart, dataSize } = wavInfo;
+      // Some encoders write dataSize=0 or a placeholder mid-recording;
+      // clamp to whatever bytes are actually available in the file.
+      const available = allBytes.length - dataStart;
+      if (dataSize <= 0 || dataSize > available) dataSize = available;
+      // Ensure an even byte count (whole int16 samples only) — trim any
+      // stray trailing byte so PCM16 alignment never drifts.
+      if (dataSize % 2 !== 0) dataSize -= 1;
+      if (dataSize < 1024) return;
+
+      const pcmBytes = allBytes.slice(dataStart, dataStart + dataSize);
 
       let binary = '';
       for (let i = 0; i < pcmBytes.length; i += 8192) {
@@ -185,7 +243,7 @@ class AudioStreamService {
         pcm:  base64,
       }));
 
-      console.log(`[audioStream] chunk #${this.seqNo} (${pcmBytes.length} bytes = ${(pcmBytes.length/32000).toFixed(1)}s)`);
+      console.log(`[audioStream] chunk #${this.seqNo} (${pcmBytes.length} bytes = ${(pcmBytes.length/32000).toFixed(1)}s, dataStart=${dataStart})`);
 
     } catch (e) {
       console.log('[audioStream] send error:', e.message);
@@ -211,6 +269,10 @@ class AudioStreamService {
       clearInterval(this._wsKeepAlive);
       this._wsKeepAlive = null;
     }
+
+    // Give the loop a brief moment to notice the flags and exit cleanly
+    // before we try to touch _recording ourselves.
+    await new Promise(r => setTimeout(r, 150));
 
     if (this._recording) {
       try { await this._recording.stopAndUnloadAsync(); } catch {}

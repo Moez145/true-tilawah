@@ -15,7 +15,7 @@ True Tilawah: AI-Powered Quranic Recitation & Tajweed AssistantTrue Tilawah is a
 │   └── requirements.txt    # Python dependencies
 │
 └── README.md               # Project documentation
-⚙️ Local Installation & Setup GuidePrerequisitesEnsure you have the following installed on your development machine:Node.js (v18.x or higher)Python (v3.10 or v3.11)MySQL (v8.0 or higher)Git & ffmpeg (added to system PATH)Step 1: Clone the Repositorygit clone https://github.com/WamiqRahim/True-Tilawah.git
+⚙️ Local Installation & Setup GuidePrerequisitesEnsure you have the following installed on your development machine:Node.js (v18.x or higher)Python (v3.10 or v3.11)MySQL (v8.0 or higher)Git & ffmpeg (added to system PATH)Step 1: Clone the Repositorygit clone (https://github.com/Moez145/true-tilawah)
 cd True-Tilawah
 Step 2: Database SetupOpen your MySQL terminal and create the application database:CREATE DATABASE true_tilawah CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 EXIT;
